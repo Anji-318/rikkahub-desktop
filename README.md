@@ -1,104 +1,70 @@
-<div align="center">
-  <img src="docs/icon.png" alt="App Icon" width="100" />
-  <h1>RikkaHub</h1>
+# RikkaHub Desktop（Compose Desktop 原生 UI）
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/rikkahub/rikkahub)
-[![Ask DeepWiki](https://img.shields.io/badge/zread.ai-blue?style=flat&logo=readthedocs)](https://zread.ai/rikkahub/rikkahub)
+桌面原生客户端：**Kotlin + Compose Multiplatform Desktop**，Skiko 原生渲染，无浏览器内核、不依赖 web-ui。
 
-A native Android LLM chat client that supports switching between different providers for
-conversations 🤖💬
+UI 方案借鉴自 `rikkahub-desktop-native` 参考项目，并逐步对齐 Android 版功能。
 
-Click to join our Discord server 👉 [【RikkaHub】](https://discord.gg/9weBqxe5c4)
+## 已实现
 
-[简体中文](README_ZH_CN.md) | [繁體中文](README_ZH_TW.md) | English
-</div>
+- ✅ 原生窗口（1280×800，最小 960×600）
+- ✅ 会话侧栏：新建/搜索/删除会话、按日期分组（今天/昨天/x月x日），JSON 文件持久化
+- ✅ 聊天主界面：消息气泡、Markdown 渲染、流式输出实时渲染、自动滚动、停止生成
+- ✅ 消息分支：重新生成/编辑会产生新分支变体，可 ◀ 1/2 ▶ 切换（与 Android 版 MessageNode 对齐）
+- ✅ 思考链（reasoning）解析与折叠展示（含思考耗时）、token 用量/速度/生成耗时显示
+- ✅ 图片附件：文件选择 → base64 多模态消息（OpenAI vision）
+- ✅ 多助手：增删改、system prompt、绑定模型、推理力度（low/medium/high），会话级助手绑定
+- ✅ 消息区：模型头像 + 名称 + 时间戳、常驻操作栏（复制/编辑/重新生成/删除）
+- ✅ 输入栏：卡片式，模型选择 / 推理力度下拉
+- ✅ Provider 设置：增删改查、启用切换、模型选择、一键拉取模型列表、系统提示词、温度滑条
+- ✅ 主题：浅色/深色/跟随系统 + 6 套预设配色（暖橙/樱花/海洋/春日/秋日/暗黑，移植自 Android 版）
+- ✅ OpenAI 兼容协议流式客户端（DeepSeek/硅基流动/Kimi/OpenAI/聚合网关）
+- ✅ 跨平台数据目录（%APPDATA% / Application Support / XDG）
 
-<div align="center">
-  <img src="docs/img/chat.png" alt="Chat Interface" width="150" />
-  <img src="docs/img/desktop.png" alt="Models Picker" width="450" />
-</div>
+## 路线图（与 Android 版的差距）
 
-## 🚀 Download
+- ⏳ 自定义主题颜色（primary/secondary/tertiary + 导入导出）
+- ⏳ 附件（图片/文档）、联网搜索、推理强度设置
+- ⏳ 助手进阶：topP/context size/maxTokens、自定义请求头/体、正则变换、提示词注入、记忆
+- ⏳ 接入上游 `:ai` 模块（Claude/Gemini 原生协议、MCP、工具调用）
+- ⏳ 显示设置：字号倍率、字体、代码块行号/折行、LaTeX、聊天背景
+- ⏳ TTS/ASR、Workspace 沙箱、备份同步、Token 统计、翻译器、图片生成
+- ⏳ 系统托盘、快捷键、原生安装包（`./gradlew packageDistributionForCurrentOS`）
 
-🔗 [Download from Website](https://rikka-ai.com/download) (Recommended)
+## 运行
 
-🔗 [Download from Google Play](https://play.google.com/store/apps/details?id=me.rerere.rikkahub)
+```bash
+# 开发模式运行（在本目录或仓库根目录均可）
+../gradlew run
 
-> [!WARNING]
-> There are many forked versions of RikkaHub. Issues with forks are unrelated to RikkaHub, so please use forks with caution to avoid privacy leaks or excessive permission requests.
+# 打 fatJar
+../gradlew shadowJar
+java -jar build/libs/rikkahub-desktop-0.3.0-all.jar
+```
 
-## 💖 Sponsors
+> 本目录自带 `settings.gradle.kts`，既可作为独立 Gradle 项目构建，
+> 也可从仓库根目录以 `:desktop` 子项目构建（注意根项目启用
+> `FAIL_ON_PROJECT_REPOS`，因此本模块不得声明自己的 `repositories` 块；
+> 仓库源配置在 `settings.gradle.kts` 中，含阿里云镜像以应对本机
+> Maven Central SSL 污染问题）。
 
-|                                         Sponsor                                         | Description                                                                                                                                                                                                                                         |
-|:---------------------------------------------------------------------------------------:|:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| <img src="docs/sponsors/aihubmix.png" alt="Aihubmix" width="50" /><br /><b>Aihubmix</b> | Thanks to <a href="https://aihubmix.com?aff=pG7r">aihubmix.com</a> for their financial support. We recommend using aihubmix as a one-stop shop for mainstream models worldwide. (OpenAI, Claude, Google Gemini, DeepSeek, Qwen, and hundreds more). |
-| <img src="docs/sponsors/suixiang.jpg" alt="随想AI中转" width="50" /><br /><b><a href="https://sui-xiang.com">随想AI中转</a></b> | 感谢<a href="https://sui-xiang.com">随想AI中转</a>对本项目的赞助！随想AI中转 是一家可靠高效的 API 中继服务提供商，提供 Claude、Codex、Gemini 等的中继服务。注重隐私的中转站·无数据倒卖·无模型掺水，隐私，透明，极速售后。新账户注册每日签到就送 0.5 元测试额度，充值额度 1:1，无需订阅，按量付费。多线路冗余、跨区域容灾、自动故障切换，长链路 SSE 不中断。99.9% 可用性，关键调用从不掉队。 |
-| <img src="docs/sponsors/ztest.png" alt="真测 ztest.ai" width="50" /><br /><b><a href="https://ztest.ai">真测 ztest.ai</a></b> | 感谢<a href="https://ztest.ai">真测 ztest.ai</a>对本项目的赞助！真测 ztest.ai 是一个 AI 中转站模型检测平台，检测结果数据全公开，23 项探针覆盖协议、身份、能力、内容完整性、安全性、性能六大维度，交叉印证识别伪造与降级。作为独立第三方验证平台，实时监测 AI 中转站的模型真实性、响应质量与服务可用性。 |
+## 数据目录
 
-## ✨ Features
+| 平台 | 路径 |
+|---|---|
+| Windows | `%APPDATA%/rikkahub` |
+| macOS | `~/Library/Application Support/rikkahub` |
+| Linux | `~/.local/share/rikkahub` |
 
-- 🎨 Material You Design and 🌙 Dark mode
-- 📦 Workspace: a proot-based Linux agent environment
-- 🔄 Multiple AI Provider Support: custom API / URL / models (all OpenAI, Google, Anthropic compatible api)
-- 🖼️ Multimodal input support (Image, Text Documentation, PDF, Docx)
-- 🖥️ Web access for multi-platform use
-- 🛠️ MCP support
-- 📝 Markdown Rendering (with code highlighting, Latex formulas, tables, Mermaid)
-- 🪾 Message Branching
-- 🔍 Search capabilities (Exa, Tavily, Zhipu, LinkUp, Brave, Perplexity, etc.)
-- 🧩 Prompt variables (model name, time, etc.)
-- 🤳 QR code export and import for providers
-- 🤖 Agent customization
-- 🧠 ChatGPT-like memory feature
-- 📝 AI Translation
-- 🌐 Custom HTTP request headers and request bodies
-- 💌 Silly Tavern character card import
+## 结构
 
-## ✨ Contributing
-
-This project is developed using [Android Studio](https://developer.android.com/studio). PRs are
-welcome!
-
-Technology stack documentation:
-
-- [Kotlin](https://kotlinlang.org/) (Development language)
-- [Koin](https://insert-koin.io/) (Dependency Injection)
-- [Jetpack Compose](https://developer.android.com/jetpack/compose) (UI framework)
-- [DataStore](https://developer.android.com/topic/libraries/architecture/datastore) (Preference data
-  storage)
-- [Room](https://developer.android.com/training/data-storage/room) (Database)
-- [Coil](https://coil-kt.github.io/coil/) (Image loading)
-- [Material You](https://m3.material.io/) (UI design)
-- [Navigation 3](https://developer.android.com/guide/navigation/navigation-3) (Navigation)
-- [Okhttp](https://square.github.io/okhttp/) (HTTP client)
-- [kotlinx.serialization](https://github.com/Kotlin/kotlinx.serialization) (JSON serialization)
-
-> [!TIP]
-> You need a `google-services.json` file at `app` folder to build the app.
-
-> [!IMPORTANT]  
-> The following PRs will be rejected:
-> 1. Translation related changes, such as adding new languages or updating existing translations
-> 2. Adding new features, this project is opinionated and will not accept pull requests for new features
-> 3. Large-scale refactoring and changes generated by AI
-
-## 💰 Donate
-
-* [Patreon](https://patreon.com/rikkahub)
-* [爱发电](https://afdian.com/a/reovo)
-
-## ⭐ Star History
-
-If you like this project, please give it a star ⭐
-
-<a href="https://www.star-history.com/?type=date&repos=re-ovo%2Frikkahub">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=re-ovo/rikkahub&type=date&theme=dark&legend=top-left&sealed_token=qSytWeq7LkzQQViTjK0MYlvvA_qkfuwjOxOqgbRpLUZZwok5rO6LXhpVL7Mq-q3o89BfKpzE7g66BCy18H6eiqTsD8czD0J-HejLqmHy-npcvCTHu11wZw" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=re-ovo/rikkahub&type=date&legend=top-left&sealed_token=qSytWeq7LkzQQViTjK0MYlvvA_qkfuwjOxOqgbRpLUZZwok5rO6LXhpVL7Mq-q3o89BfKpzE7g66BCy18H6eiqTsD8czD0J-HejLqmHy-npcvCTHu11wZw" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=re-ovo/rikkahub&type=date&legend=top-left&sealed_token=qSytWeq7LkzQQViTjK0MYlvvA_qkfuwjOxOqgbRpLUZZwok5rO6LXhpVL7Mq-q3o89BfKpzE7g66BCy18H6eiqTsD8czD0J-HejLqmHy-npcvCTHu11wZw" />
- </picture>
-</a>
-
-## 📄 License
-
-This project is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
+```
+src/main/kotlin/me/rerere/rikkahub/desktop/
+├── Main.kt                 # 窗口入口
+├── data/Models.kt          # Provider/助手/会话/消息节点数据模型
+├── data/Stores.kt          # 跨平台存储（JSON 持久化）
+├── llm/OpenAiClient.kt     # OpenAI 兼容 SSE 流式客户端（正文/思考链/用量）
+└── ui/
+    ├── theme/              # Material3 主题 + 6 套预设配色（移植自 Android 版）
+    ├── chat/               # ChatScreen + ChatViewModel（分支/流式/思考链）
+    └── settings/           # 设置：Provider、助手、外观、通用
+```
