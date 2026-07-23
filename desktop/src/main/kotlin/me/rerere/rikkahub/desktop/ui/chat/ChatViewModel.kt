@@ -47,6 +47,15 @@ class ChatViewModel(
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error
 
+    /** 待发送的图片附件（data URL） */
+    private val _pendingImages = MutableStateFlow<List<String>>(emptyList())
+    val pendingImages: StateFlow<List<String>> = _pendingImages
+
+    fun addPendingImage(dataUrl: String) { _pendingImages.value = _pendingImages.value + dataUrl }
+    fun removePendingImage(index: Int) {
+        _pendingImages.value = _pendingImages.value.filterIndexed { i, _ -> i != index }
+    }
+
     private var streamJob: Job? = null
 
     fun refreshSettings() { _settings.value = settingsStore.settings }
@@ -73,8 +82,26 @@ class ChatViewModel(
         if (_current.value?.id == id) _current.value = _conversations.value.firstOrNull()
     }
 
+    /** 切换全局聊天模型（输入栏模型下拉） */
+    fun switchModel(model: String) {
+        settingsStore.update { activeModel = model }
+        refreshSettings()
+    }
+
+    /** 设置当前助手的推理力度（输入栏推理下拉） */
+    fun setAssistantReasoningEffort(effort: String?) {
+        val id = _current.value?.assistantId ?: _settings.value.activeAssistantId ?: return
+        settingsStore.update {
+            val idx = assistants.indexOfFirst { it.id == id }
+            if (idx >= 0) assistants[idx] = assistants[idx].copy(reasoningEffort = effort)
+        }
+        refreshSettings()
+    }
+
     fun send(text: String) {
-        if (text.isBlank() || _streaming.value) return
+        if (_streaming.value) return
+        val images = _pendingImages.value
+        if (text.isBlank() && images.isEmpty()) return
         if (settingsStore.activeProvider() == null) { _error.value = "请先在设置中添加 Provider"; return }
         if (_settings.value.activeModel == null &&
             settingsStore.activeProvider()?.models.isNullOrEmpty()
@@ -83,9 +110,14 @@ class ChatViewModel(
         var conv = _current.value
             ?: conversationStore.create(assistantId = _settings.value.activeAssistantId)
         conv.messageNodes.add(
-            MessageNode(messages = mutableListOf(ChatMessage(role = "user", content = text)))
+            MessageNode(
+                messages = mutableListOf(
+                    ChatMessage(role = "user", content = text, imageUrls = images)
+                )
+            )
         )
-        if (conv.title == "新对话") conv.title = text.take(20)
+        if (conv.title == "新对话") conv.title = text.take(20).ifBlank { "图片对话" }
+        _pendingImages.value = emptyList()
         conv = conversationStore.save(conv)
         _current.value = conv
         _conversations.value = conversationStore.list()
@@ -113,6 +145,7 @@ class ChatViewModel(
         if (model == null) { _error.value = "未选择模型"; return }
         val systemPrompt = assistant?.systemPrompt?.ifBlank { s.systemPrompt } ?: s.systemPrompt
         val temperature = assistant?.temperature ?: s.temperature
+        val reasoningEffort = assistant?.reasoningEffort
 
         // 追加空的 assistant 变体：最后一个节点不是 assistant 时新建节点，否则新建分支
         val lastNode = conv.messageNodes.lastOrNull()
@@ -139,7 +172,10 @@ class ChatViewModel(
             val rsb = StringBuilder()
             var promptTokens: Int? = null
             var completionTokens: Int? = null
-            llm.streamChat(provider, model, context, systemPrompt, temperature)
+            val startAt = System.currentTimeMillis()
+            var firstReasoningAt = 0L
+            var firstContentAt = 0L
+            llm.streamChat(provider, model, context, systemPrompt, temperature, reasoningEffort)
                 .catch { e -> _error.value = e.message }
                 .onCompletion {
                     // 停止/出错时保留已生成的部分内容
@@ -149,6 +185,10 @@ class ChatViewModel(
                         model = model,
                         promptTokens = promptTokens,
                         completionTokens = completionTokens,
+                        generationMs = System.currentTimeMillis() - startAt,
+                        reasoningMs = if (firstReasoningAt > 0) {
+                            (if (firstContentAt > 0) firstContentAt else System.currentTimeMillis()) - firstReasoningAt
+                        } else null,
                     )
                     conversationStore.save(conv)
                     _current.value = conversationStore.get(conv.id)
@@ -158,10 +198,12 @@ class ChatViewModel(
                 .collect { delta ->
                     when (delta) {
                         is StreamDelta.Content -> {
+                            if (firstContentAt == 0L) firstContentAt = System.currentTimeMillis()
                             sb.append(delta.text)
                             _streamingText.value = sb.toString()
                         }
                         is StreamDelta.Reasoning -> {
+                            if (firstReasoningAt == 0L) firstReasoningAt = System.currentTimeMillis()
                             rsb.append(delta.text)
                             _streamingReasoning.value = rsb.toString()
                         }

@@ -9,7 +9,7 @@ plugins {
 }
 
 group = "me.rerere.rikkahub"
-version = "0.2.0"
+version = "0.3.0"
 
 val ktorVersion = "3.1.3"
 
@@ -47,7 +47,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi, TargetFormat.Dmg, TargetFormat.Deb)
             packageName = "RikkaHub"
-            packageVersion = "0.2.0"
+            packageVersion = "0.3.0"
             description = "RikkaHub Desktop - LLM Chat Client"
             vendor = "rikkahub"
             macOS {
@@ -60,7 +60,7 @@ compose.desktop {
 
 tasks.shadowJar {
     archiveBaseName.set("rikkahub-desktop")
-    archiveVersion.set("0.2.0")
+    archiveVersion.set("0.3.0")
     mergeServiceFiles()
     manifest {
         attributes("Main-Class" to "me.rerere.rikkahub.desktop.MainKt")

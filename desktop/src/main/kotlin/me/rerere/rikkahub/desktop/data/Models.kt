@@ -20,6 +20,7 @@ data class Assistant(
     val systemPrompt: String = "",
     val chatModel: String? = null, // 绑定模型（null 用全局 activeModel）
     val temperature: Double? = null, // null 用全局温度
+    val reasoningEffort: String? = null, // null=不设置；low/medium/high
 )
 
 @Serializable
@@ -48,6 +49,9 @@ data class ChatMessage(
     val reasoning: String = "",
     val promptTokens: Int? = null,
     val completionTokens: Int? = null,
+    val imageUrls: List<String> = emptyList(), // 图片附件（data URL）
+    val generationMs: Long? = null, // 生成耗时
+    val reasoningMs: Long? = null, // 思考耗时
 )
 
 /**

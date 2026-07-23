@@ -16,13 +16,16 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import me.rerere.rikkahub.desktop.data.ChatMessage
 import me.rerere.rikkahub.desktop.data.ProviderConfig
 
@@ -44,41 +47,41 @@ class OpenAiClient {
         engine { requestTimeout = 300_000 }
     }
 
-    @Serializable
-    private data class OaiMessage(val role: String, val content: String)
-
-    @Serializable
-    private data class StreamOptions(val include_usage: Boolean = true)
-
-    @Serializable
-    private data class OaiRequest(
-        val model: String,
-        val messages: List<OaiMessage>,
-        val temperature: Double,
-        val stream: Boolean = true,
-        val stream_options: StreamOptions = StreamOptions(),
-    )
-
     fun streamChat(
         provider: ProviderConfig,
         model: String,
         history: List<ChatMessage>,
         systemPrompt: String,
         temperature: Double,
+        reasoningEffort: String? = null,
     ): Flow<StreamDelta> = flow {
-        val messages = buildList {
-            if (systemPrompt.isNotBlank()) add(OaiMessage("system", systemPrompt))
-            history.takeLast(40).forEach { add(OaiMessage(it.role, it.content)) }
-        }
         val url = provider.baseUrl.trimEnd('/') + "/chat/completions"
-        val body = OaiRequest(model, messages, temperature)
+        val body = buildJsonObject {
+            put("model", model)
+            put("temperature", temperature)
+            put("stream", true)
+            put("stream_options", buildJsonObject { put("include_usage", true) })
+            reasoningEffort?.let { put("reasoning_effort", it) }
+            put("messages", buildJsonArray {
+                if (systemPrompt.isNotBlank()) {
+                    add(buildJsonObject {
+                        put("role", "system")
+                        put("content", systemPrompt)
+                    })
+                }
+                history.takeLast(40).forEach { msg -> add(buildMessage(msg)) }
+            })
+        }
 
         client.preparePost(url) {
             contentType(ContentType.Application.Json)
             header(HttpHeaders.Authorization, "Bearer ${provider.apiKey}")
-            setBody(json.encodeToString(OaiRequest.serializer(), body))
+            setBody(body.toString())
         }.execute { resp ->
-            if (resp.status.value >= 400) error("LLM 请求失败 HTTP ${resp.status.value}")
+            if (resp.status.value >= 400) {
+                val detail = runCatching { resp.bodyAsText().take(300) }.getOrDefault("")
+                error("LLM 请求失败 HTTP ${resp.status.value} $detail")
+            }
             val channel = resp.bodyAsChannel()
             while (!channel.isClosedForRead) {
                 val line = channel.readUTF8Line() ?: continue
@@ -106,6 +109,29 @@ class OpenAiClient {
             }
         }
     }.flowOn(Dispatchers.IO)
+
+    /** 有图片附件时走多模态 content 数组，否则纯文本 */
+    private fun buildMessage(msg: ChatMessage): JsonObject = buildJsonObject {
+        put("role", msg.role)
+        if (msg.imageUrls.isEmpty()) {
+            put("content", msg.content)
+        } else {
+            put("content", buildJsonArray {
+                if (msg.content.isNotBlank()) {
+                    add(buildJsonObject {
+                        put("type", "text")
+                        put("text", msg.content)
+                    })
+                }
+                msg.imageUrls.forEach { url ->
+                    add(buildJsonObject {
+                        put("type", "image_url")
+                        put("image_url", buildJsonObject { put("url", url) })
+                    })
+                }
+            })
+        }
+    }
 
     /** 拉取模型列表（GET /models），失败时返回空列表 */
     suspend fun listModels(provider: ProviderConfig): List<String> = runCatching {
