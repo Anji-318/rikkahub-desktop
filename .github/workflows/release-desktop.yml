@@ -1,0 +1,89 @@
+name: Release RikkaHub Desktop（Windows）
+
+on:
+  workflow_dispatch:   # 仅手动触发
+    inputs:
+      tag:
+        description: '发布标签（同名自动覆盖旧 Release）'
+        required: true
+        default: 'v0.2.0-desktop'
+
+permissions:
+  contents: write      # 允许创建/删除 Release
+
+jobs:
+  build:
+    runs-on: windows-latest   # jpackage 打 Windows 包必须在 Windows runner 上
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: 本地构建用 google-services.json（配置阶段需要，桌面版不使用）
+        run: |
+          @'
+          {
+            "project_info": {
+              "project_number": "100000000000",
+              "project_id": "rikkahub-local-build",
+              "storage_bucket": "rikkahub-local-build.appspot.com"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:100000000000:android:0000000000000000000000",
+                  "android_client_info": { "package_name": "me.rerere.rikkahub" }
+                },
+                "api_key": [ { "current_key": "AIzaSyLocalBuildDummyKey000000000000000" } ]
+              }
+            ],
+            "configuration_version": "1"
+          }
+          '@ | Out-File -Encoding utf8 app/google-services.json
+        shell: pwsh
+
+      - name: 构建桌面版（绿色目录 + MSI 安装包）
+        run: |
+          ./gradlew :desktop:createDistributable :desktop:packageMsi --no-daemon
+        env:
+          GRADLE_OPTS: "-Xmx4g"
+
+      - name: 打包绿色版 zip
+        run: |
+          mkdir dist
+          Compress-Archive -Path desktop/build/compose/binaries/main/app/RikkaHub -DestinationPath dist/RikkaHub-desktop-windows-x64.zip
+          Copy-Item desktop/build/compose/binaries/main/msi/*.msi dist/
+          ls dist
+        shell: pwsh
+
+      - name: 上传到 Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: RikkaHub-desktop-windows
+          path: dist/*
+
+      - name: 删除已存在的同名 Release 和 tag（覆盖发布）
+        run: |
+          gh release delete "${{ inputs.tag }}" --yes --cleanup-tag 2>$null; $true
+          git push origin ":refs/tags/${{ inputs.tag }}" 2>$null; $true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 创建 GitHub Release 并附带安装包
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: RikkaHub Desktop ${{ inputs.tag }}
+          body: |
+            RikkaHub 桌面原生客户端（Compose Desktop，Windows x64）。
+            - `RikkaHub-*.msi`：安装包
+            - `RikkaHub-desktop-windows-x64.zip`：绿色版，解压后运行 RikkaHub.exe
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

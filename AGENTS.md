@@ -38,6 +38,9 @@
 - **app**: Main application module with UI, ViewModels, and core logic
 - **ai**: AI SDK abstraction layer for different providers (OpenAI, Google, Anthropic)
 - **common**: Common utilities and extensions
+- **desktop**: Desktop native client built with Compose Multiplatform Desktop (Kotlin/JVM, no browser/web-ui). Can be
+  built standalone from `desktop/` or as `:desktop` from the root build; it must not declare its own `repositories`
+  block because the root build uses `FAIL_ON_PROJECT_REPOS`.
 - **document**: Document parsing module for handling PDF, DOCX, PPTX, and EPUB files
 - **highlight**: Code syntax highlighting implementation
 - **material3**: Material color utility extensions used by the app UI
