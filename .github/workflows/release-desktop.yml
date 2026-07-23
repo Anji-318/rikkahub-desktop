@@ -6,7 +6,7 @@ on:
       tag:
         description: '发布标签（同名自动覆盖旧 Release）'
         required: true
-        default: 'v0.2.0-desktop'
+        default: 'v0.3.0-desktop'
 
 permissions:
   contents: write      # 允许创建/删除 Release
@@ -24,40 +24,17 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: 本地构建用 google-services.json（配置阶段需要，桌面版不使用）
-        run: |
-          @'
-          {
-            "project_info": {
-              "project_number": "100000000000",
-              "project_id": "rikkahub-local-build",
-              "storage_bucket": "rikkahub-local-build.appspot.com"
-            },
-            "client": [
-              {
-                "client_info": {
-                  "mobilesdk_app_id": "1:100000000000:android:0000000000000000000000",
-                  "android_client_info": { "package_name": "me.rerere.rikkahub" }
-                },
-                "api_key": [ { "current_key": "AIzaSyLocalBuildDummyKey000000000000000" } ]
-              }
-            ],
-            "configuration_version": "1"
-          }
-          '@ | Out-File -Encoding utf8 app/google-services.json
-        shell: pwsh
-
       - name: 构建桌面版（绿色目录 + MSI 安装包）
         run: |
-          ./gradlew :desktop:createDistributable :desktop:packageMsi --no-daemon
+          ./gradlew createDistributable packageMsi --no-daemon
         env:
           GRADLE_OPTS: "-Xmx4g"
 
       - name: 打包绿色版 zip
         run: |
           mkdir dist
-          Compress-Archive -Path desktop/build/compose/binaries/main/app/RikkaHub -DestinationPath dist/RikkaHub-desktop-windows-x64.zip
-          Copy-Item desktop/build/compose/binaries/main/msi/*.msi dist/
+          Compress-Archive -Path build/compose/binaries/main/app/RikkaHub -DestinationPath dist/RikkaHub-desktop-windows-x64.zip
+          Copy-Item build/compose/binaries/main/msi/*.msi dist/
           ls dist
         shell: pwsh
 
