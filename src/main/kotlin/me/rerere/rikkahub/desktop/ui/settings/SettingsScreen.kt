@@ -23,6 +23,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.style.TextOverflow
 import me.rerere.rikkahub.desktop.data.Assistant
+import me.rerere.rikkahub.desktop.data.AssistantRegex
+import me.rerere.rikkahub.desktop.data.KVEntry
 import me.rerere.rikkahub.desktop.data.ProviderConfig
 import me.rerere.rikkahub.desktop.data.QuickMessage
 import me.rerere.rikkahub.desktop.ui.chat.ChatViewModel
@@ -416,7 +418,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
         // 版本号（用于确认当前运行的构建版本）
         Spacer(Modifier.height(24.dp))
         Text(
-            "RikkaHub Desktop v0.4.0",
+            "RikkaHub Desktop v0.5.0",
             fontSize = 11.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
         )
@@ -498,6 +500,15 @@ private fun AssistantEditorDialog(
     var topP by remember { mutableStateOf(initial?.topP?.toString() ?: "") }
     var maxTokens by remember { mutableStateOf(initial?.maxTokens?.toString() ?: "") }
     var contextSize by remember { mutableStateOf(initial?.contextMessageSize?.toString() ?: "") }
+    var regexText by remember {
+        mutableStateOf(initial?.regexes?.joinToString("\n") { "${it.scope}|${it.find}|${it.replace}" } ?: "")
+    }
+    var headersText by remember {
+        mutableStateOf(initial?.customHeaders?.joinToString("\n") { "${it.key}: ${it.value}" } ?: "")
+    }
+    var bodiesText by remember {
+        mutableStateOf(initial?.customBodies?.joinToString("\n") { "${it.key}: ${it.value}" } ?: "")
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -564,6 +575,24 @@ private fun AssistantEditorDialog(
                         modifier = Modifier.weight(1f)
                     )
                 }
+                OutlinedTextField(
+                    value = headersText,
+                    onValueChange = { headersText = it },
+                    label = { Text("自定义请求头（每行 Key: Value）") },
+                    maxLines = 3,
+                )
+                OutlinedTextField(
+                    value = bodiesText,
+                    onValueChange = { bodiesText = it },
+                    label = { Text("自定义请求体（每行 key: value，支持 JSON）") },
+                    maxLines = 3,
+                )
+                OutlinedTextField(
+                    value = regexText,
+                    onValueChange = { regexText = it },
+                    label = { Text("正则变换（每行 input|查找|替换 或 output|查找|替换）") },
+                    maxLines = 4,
+                )
             }
         },
         confirmButton = {
@@ -581,12 +610,33 @@ private fun AssistantEditorDialog(
                             maxTokens = maxTokens.toIntOrNull(),
                             contextMessageSize = contextSize.toIntOrNull(),
                             reasoningEffort = initial?.reasoningEffort,
+                            customHeaders = parseKvLines(headersText),
+                            customBodies = parseKvLines(bodiesText),
+                            regexes = parseRegexLines(regexText),
                         )
                     )
                 }
             ) { Text("保存") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+/** 解析 "Key: Value" 行式文本 */
+private fun parseKvLines(text: String) = text.lines().mapNotNull { line ->
+    val idx = line.indexOf(':')
+    if (idx <= 0) return@mapNotNull null
+    KVEntry(key = line.substring(0, idx).trim(), value = line.substring(idx + 1).trim())
+}
+
+/** 解析 "scope|find|replace" 行式文本 */
+private fun parseRegexLines(text: String) = text.lines().mapNotNull { line ->
+    val parts = line.split("|", limit = 3)
+    if (parts.size != 3 || parts[1].isBlank()) return@mapNotNull null
+    AssistantRegex(
+        scope = if (parts[0].trim() == "input") "input" else "output",
+        find = parts[1],
+        replace = parts[2],
     )
 }
 
@@ -598,6 +648,7 @@ private fun ProviderEditorDialog(
     onSave: (ProviderConfig) -> Unit
 ) {
     var name by remember { mutableStateOf(initial?.name ?: "") }
+    var type by remember { mutableStateOf(initial?.type ?: "openai") }
     var baseUrl by remember { mutableStateOf(initial?.baseUrl ?: "https://api.deepseek.com/v1") }
     var apiKey by remember { mutableStateOf(initial?.apiKey ?: "") }
     var models by remember { mutableStateOf(initial?.models?.joinToString(", ") ?: "") }
@@ -610,7 +661,26 @@ private fun ProviderEditorDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(name, { name = it }, label = { Text("名称") }, singleLine = true)
-                OutlinedTextField(baseUrl, { baseUrl = it }, label = { Text("Base URL（OpenAI 兼容）") }, singleLine = true)
+                // 协议类型
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf("openai" to "OpenAI 兼容", "claude" to "Claude", "google" to "Gemini").forEach { (t, label) ->
+                        FilterChip(
+                            selected = type == t,
+                            onClick = {
+                                type = t
+                                if (initial == null) {
+                                    baseUrl = when (t) {
+                                        "claude" -> "https://api.anthropic.com"
+                                        "google" -> "https://generativelanguage.googleapis.com"
+                                        else -> baseUrl
+                                    }
+                                }
+                            },
+                            label = { Text(label, fontSize = 11.sp) }
+                        )
+                    }
+                }
+                OutlinedTextField(baseUrl, { baseUrl = it }, label = { Text("Base URL") }, singleLine = true)
                 OutlinedTextField(apiKey, { apiKey = it }, label = { Text("API Key") }, singleLine = true)
                 OutlinedTextField(
                     value = models,
@@ -627,7 +697,7 @@ private fun ProviderEditorDialog(
                         onClick = {
                             fetching = true
                             fetchMsg = null
-                            vm.fetchModelsRaw(baseUrl, apiKey) { list ->
+                            vm.fetchModelsRaw(baseUrl, apiKey, type) { list ->
                                 fetching = false
                                 if (list.isEmpty()) {
                                     fetchMsg = "拉取失败或无模型，请检查 Base URL 和 Key"
@@ -654,7 +724,8 @@ private fun ProviderEditorDialog(
                         ProviderConfig(
                             id = initial?.id ?: java.util.UUID.randomUUID().toString(),
                             name = name, baseUrl = baseUrl, apiKey = apiKey,
-                            models = models.split(",", "，").map { it.trim() }.filter { it.isNotEmpty() }
+                            models = models.split(",", "，").map { it.trim() }.filter { it.isNotEmpty() },
+                            type = type,
                         )
                     )
                 }
