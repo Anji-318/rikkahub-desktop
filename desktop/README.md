@@ -7,11 +7,14 @@ UI 方案借鉴自 `rikkahub-desktop-native` 参考项目，并逐步对齐 Andr
 ## 已实现
 
 - ✅ 原生窗口（1280×800，最小 960×600）
-- ✅ 会话侧栏：新建/选择/删除会话，JSON 文件持久化
+- ✅ 会话侧栏：新建/搜索/删除会话、按日期分组（今天/昨天/x月x日），JSON 文件持久化
 - ✅ 聊天主界面：消息气泡、Markdown 渲染、流式输出实时渲染、自动滚动、停止生成
 - ✅ 消息分支：重新生成/编辑会产生新分支变体，可 ◀ 1/2 ▶ 切换（与 Android 版 MessageNode 对齐）
-- ✅ 思考链（reasoning）解析与折叠展示、token 用量显示（`stream_options.include_usage`）
-- ✅ 多助手：增删改、system prompt、绑定模型，会话级助手绑定
+- ✅ 思考链（reasoning）解析与折叠展示（含思考耗时）、token 用量/速度/生成耗时显示
+- ✅ 图片附件：文件选择 → base64 多模态消息（OpenAI vision）
+- ✅ 多助手：增删改、system prompt、绑定模型、推理力度（low/medium/high），会话级助手绑定
+- ✅ 消息区：模型头像 + 名称 + 时间戳、常驻操作栏（复制/编辑/重新生成/删除）
+- ✅ 输入栏：卡片式，模型选择 / 推理力度下拉
 - ✅ Provider 设置：增删改查、启用切换、模型选择、一键拉取模型列表、系统提示词、温度滑条
 - ✅ 主题：浅色/深色/跟随系统 + 6 套预设配色（暖橙/樱花/海洋/春日/秋日/暗黑，移植自 Android 版）
 - ✅ OpenAI 兼容协议流式客户端（DeepSeek/硅基流动/Kimi/OpenAI/聚合网关）
@@ -35,7 +38,7 @@ UI 方案借鉴自 `rikkahub-desktop-native` 参考项目，并逐步对齐 Andr
 
 # 打 fatJar
 ../gradlew shadowJar
-java -jar build/libs/rikkahub-desktop-0.2.0-all.jar
+java -jar build/libs/rikkahub-desktop-0.3.0-all.jar
 ```
 
 > 本目录自带 `settings.gradle.kts`，既可作为独立 Gradle 项目构建，
