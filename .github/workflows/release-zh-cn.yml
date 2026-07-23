@@ -4,9 +4,12 @@ on:
   workflow_dispatch:   # 仅手动触发
     inputs:
       tag:
-        description: '发布标签，例如 v2.4.2-zh'
+        description: '发布标签（同名自动覆盖旧 Release）'
         required: true
         default: 'v2.4.2-zh'
+
+permissions:
+  contents: write      # 允许创建/删除 Release
 
 jobs:
   build:
@@ -114,6 +117,13 @@ jobs:
         with:
           name: RikkaHub-zhCN-release-apk
           path: dist/*.apk
+
+      - name: 删除已存在的同名 Release 和 tag（覆盖发布）
+        run: |
+          gh release delete "${{ inputs.tag }}" --yes --cleanup-tag 2>/dev/null || true
+          git push origin ":refs/tags/${{ inputs.tag }}" 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 创建 GitHub Release 并附带 APK
         uses: softprops/action-gh-release@v2

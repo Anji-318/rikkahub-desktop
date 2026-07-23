@@ -11,3 +11,9 @@ local.properties
 .cursor
 .history
 .kotlin
+
+# ===== 签名/密钥（绝不入库）=====
+*.jks
+*.keystore
+git-config.txt
+git_push_v1.1.exe
