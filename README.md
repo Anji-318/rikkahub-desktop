@@ -1,11 +1,13 @@
 # RikkaHub Desktop（Compose Desktop 原生 UI）
 
-桌面原生客户端：**Kotlin + Compose Multiplatform Desktop**，Skiko 原生渲染，无浏览器内核、不依赖 web-ui。
-
-UI 方案借鉴自 `rikkahub-desktop-native` 参考项目，并逐步对齐 Android 版功能。
+RikkaHub 桌面原生客户端，基于 [rikkahub/rikkahub](https://github.com/rikkahub/rikkahub)（Android 版）重构：复用其数据模型概念与界面设计语言，以 **Kotlin + Compose Multiplatform Desktop** 实现的 Windows/macOS/Linux 桌面版，Skiko 原生渲染，无浏览器内核、不依赖 web-ui，功能逐步对齐 Android 版。
 
 ## 已实现
 
+- ✅ 多协议：OpenAI 兼容 / Claude 原生（thinking + prompt 图片）/ Gemini 原生（thinkingConfig）
+- ✅ 预置 21 个 Provider（含 Gemini、MiniMax，与安卓对齐）
+- ✅ 助手正则变换（input/output 作用域）+ 自定义请求头/请求体
+- ✅ 会话置顶、导出对话为 Markdown
 - ✅ 原生窗口（1280×800，最小 960×600）+ 应用图标（窗口/exe/安装包）+ 单实例锁
 - ✅ 会话侧栏：新建/搜索/删除会话、按日期分组（今天/昨天/x月x日），JSON 文件持久化
 - ✅ 用户信息：昵称/头像编辑（头像自动缩放 128px）+ 时段问候语，持久化
@@ -30,11 +32,11 @@ UI 方案借鉴自 `rikkahub-desktop-native` 参考项目，并逐步对齐 Andr
 
 ## 路线图（与 Android 版的差距）
 
-- ⏳ Claude/Gemini 原生协议（含 prompt caching、Responses API）
-- ⏳ 助手进阶：自定义请求头/体、正则变换、提示词注入（mode/lorebook）、记忆
+- ⏳ Claude prompt caching、OpenAI Responses API
+- ⏳ 提示词注入（mode/lorebook）、助手记忆
 - ⏳ 自定义主题颜色（HSL 编辑器 + 导入导出）、LaTeX、代码块行号/折行、字体
 - ⏳ 更多搜索服务（Brave/SearXNG/智谱等 16 种）、搜索深度选项
-- ⏳ MCP、TTS/ASR、Workspace 沙箱、备份同步（WebDAV/S3）、Token 统计、图片生成
+- ⏳ MCP、TTS/ASR、Workspace 沙箱、备份同步（WebDAV/S3）、Token 统计、图片生成、上下文压缩
 - ⏳ 系统托盘、快捷键
 
 ## 运行
@@ -45,14 +47,11 @@ UI 方案借鉴自 `rikkahub-desktop-native` 参考项目，并逐步对齐 Andr
 
 # 打 fatJar
 ./gradlew shadowJar
-java -jar build/libs/rikkahub-desktop-0.4.0-all.jar
+java -jar build/libs/rikkahub-desktop-0.5.0-all.jar
 ```
 
-> 本目录自带 `settings.gradle.kts`，既可作为独立 Gradle 项目构建，
-> 也可从仓库根目录以 `:desktop` 子项目构建（注意根项目启用
-> `FAIL_ON_PROJECT_REPOS`，因此本模块不得声明自己的 `repositories` 块；
-> 仓库源配置在 `settings.gradle.kts` 中，含阿里云镜像以应对本机
-> Maven Central SSL 污染问题）。
+> 本仓库即独立 Gradle 项目（根目录 `settings.gradle.kts`，rootProject = rikkahub-desktop），
+> 仓库源配置含阿里云镜像（应对本机 Maven Central SSL 污染）。
 
 ## 数据目录
 
@@ -66,12 +65,19 @@ java -jar build/libs/rikkahub-desktop-0.4.0-all.jar
 
 ```
 src/main/kotlin/me/rerere/rikkahub/desktop/
-├── Main.kt                 # 窗口入口
-├── data/Models.kt          # Provider/助手/会话/消息节点数据模型
-├── data/Stores.kt          # 跨平台存储（JSON 持久化）
-├── llm/OpenAiClient.kt     # OpenAI 兼容 SSE 流式客户端（正文/思考链/用量）
+├── Main.kt                 # 窗口入口（单实例锁、应用图标）
+├── data/
+│   ├── Models.kt           # Provider/助手/会话/消息节点/显示设置/快捷消息 数据模型
+│   ├── Presets.kt          # 预置 19 个 Provider、4 个内置助手、推理六档
+│   └── Stores.kt           # 跨平台存储（JSON 持久化 + 预置合并）
+├── llm/
+│   ├── LlmClient.kt        # 多协议统一接口 + 推理预算映射
+│   ├── OpenAiClient.kt     # OpenAI 兼容 SSE 流式客户端（正文/思考链/用量/多模态）
+│   ├── ClaudeClient.kt     # Claude 原生协议（thinking_delta / 图片 / budget_tokens）
+│   ├── GeminiClient.kt     # Gemini 原生协议（thought parts / thinkingConfig）
+│   └── SearchClient.kt     # 联网搜索（Tavily / Exa）
 └── ui/
     ├── theme/              # Material3 主题 + 6 套预设配色（移植自 Android 版）
-    ├── chat/               # ChatScreen + ChatViewModel（分支/流式/思考链）
-    └── settings/           # 设置：Provider、助手、外观、通用
+    ├── chat/               # ChatScreen + ChatViewModel（分支/流式/思考链/翻译/收藏）
+    └── settings/           # 设置：Provider、助手、快捷消息、默认模型、联网搜索、外观、界面、通用
 ```

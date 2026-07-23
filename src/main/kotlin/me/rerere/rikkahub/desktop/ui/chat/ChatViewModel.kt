@@ -18,7 +18,8 @@ import me.rerere.rikkahub.desktop.data.Conversation
 import me.rerere.rikkahub.desktop.data.ConversationStore
 import me.rerere.rikkahub.desktop.data.MessageNode
 import me.rerere.rikkahub.desktop.data.SettingsStore
-import me.rerere.rikkahub.desktop.llm.OpenAiClient
+import me.rerere.rikkahub.desktop.llm.ChatParams
+import me.rerere.rikkahub.desktop.llm.LlmClient
 import me.rerere.rikkahub.desktop.llm.SearchClient
 import me.rerere.rikkahub.desktop.llm.StreamDelta
 import java.util.UUID
@@ -26,7 +27,6 @@ import java.util.UUID
 class ChatViewModel(
     val settingsStore: SettingsStore = SettingsStore(),
     val conversationStore: ConversationStore = ConversationStore(),
-    private val llm: OpenAiClient = OpenAiClient(),
     private val searchClient: SearchClient = SearchClient(),
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -91,7 +91,7 @@ class ChatViewModel(
         _translation.value = ""
         _translationLoading.value = true
         scope.launch {
-            val result = llm.complete(provider, model, settings.translatePrompt + "\n\n" + content.take(4000))
+            val result = LlmClient.of(provider).complete(provider, model, settings.translatePrompt + "\n\n" + content.take(4000))
             _translationLoading.value = false
             _translation.value = result ?: "翻译失败，请检查模型配置"
         }
@@ -108,6 +108,30 @@ class ChatViewModel(
         }
         conversationStore.save(conv)
         _current.value = conversationStore.get(conv.id)
+    }
+
+    /** 置顶/取消置顶会话 */
+    fun togglePinConversation(id: String) {
+        val conv = conversationStore.get(id) ?: return
+        conv.pinned = !conv.pinned
+        conversationStore.save(conv)
+        _conversations.value = conversationStore.list()
+        if (_current.value?.id == id) _current.value = conv
+    }
+
+    /** 导出会话为 Markdown 文本 */
+    fun exportConversationMarkdown(id: String): String? {
+        val conv = conversationStore.get(id) ?: return null
+        val sb = StringBuilder("# ${conv.title}\n\n")
+        conv.currentMessages.forEach { m ->
+            val who = if (m.role == "user") "用户" else (m.model ?: "助手")
+            sb.append("## ").append(who).append("\n\n")
+            if (m.reasoning.isNotBlank()) {
+                sb.append("> 思考：").append(m.reasoning.replace("\n", "\n> ")).append("\n\n")
+            }
+            sb.append(m.content).append("\n\n")
+        }
+        return sb.toString()
     }
 
     /** 全部收藏消息（跨会话，收藏夹视图用） */
@@ -134,6 +158,16 @@ class ChatViewModel(
         val c = conversationStore.create(assistantId = settings.activeAssistantId)
         _conversations.value = conversationStore.list()
         _current.value = c
+    }
+
+    /** 应用助手正则变换（对齐安卓 AssistantRegex 子集：input/output 作用域） */
+    private fun applyRegex(text: String, assistant: me.rerere.rikkahub.desktop.data.Assistant?, scope: String): String {
+        if (text.isEmpty() || assistant == null) return text
+        var result = text
+        assistant.regexes.filter { it.enabled && it.scope == scope && it.find.isNotBlank() }.forEach { r ->
+            result = runCatching { result.replace(Regex(r.find), r.replace) }.getOrElse { result }
+        }
+        return result
     }
 
     /** 切换当前助手（影响之后新建的会话） */
@@ -248,7 +282,11 @@ class ChatViewModel(
         conversationStore.save(conv)
         _current.value = conv
 
-        val context = conv.currentMessages.dropLast(1)
+        // 输入正则：作用于发送给 API 的用户消息（不改动本地存储）
+        val rawContext = conv.currentMessages.dropLast(1)
+        val context = rawContext.map { msg ->
+            if (msg.role == "user") msg.copy(content = applyRegex(msg.content, assistant, "input")) else msg
+        }
         val targetNode = conv.messageNodes.last()
         val targetIndex = targetNode.selectIndex
 
@@ -271,15 +309,27 @@ class ChatViewModel(
             val startAt = System.currentTimeMillis()
             var firstReasoningAt = 0L
             var firstContentAt = 0L
-            llm.streamChat(
-                provider, model, context, systemPrompt, temperature, reasoningEffort,
-                topP, maxTokens, contextSize, searchContext,
+            LlmClient.of(provider).streamChat(
+                provider,
+                ChatParams(
+                    model = model,
+                    history = context,
+                    systemPrompt = systemPrompt,
+                    temperature = temperature,
+                    topP = topP,
+                    maxTokens = maxTokens,
+                    contextSize = contextSize,
+                    reasoningEffort = reasoningEffort,
+                    searchContext = searchContext,
+                    customHeaders = assistant?.customHeaders ?: emptyList(),
+                    customBodies = assistant?.customBodies ?: emptyList(),
+                ),
             )
                 .catch { e -> _error.value = e.message }
                 .onCompletion {
-                    // 停止/出错时保留已生成的部分内容
+                    // 停止/出错时保留已生成的部分内容；输出正则作用于最终回复
                     targetNode.messages[targetIndex] = targetNode.messages[targetIndex].copy(
-                        content = sb.toString(),
+                        content = applyRegex(sb.toString(), assistant, "output"),
                         reasoning = rsb.toString(),
                         model = model,
                         promptTokens = promptTokens,
@@ -330,7 +380,7 @@ class ChatViewModel(
             val conv = conversationStore.get(conversationId) ?: return@launch
             if (conv.title != "新对话") return@launch
             val firstUser = context.firstOrNull { it.role == "user" }?.content?.take(300) ?: return@launch
-            val title = llm.complete(provider, model, settings.titlePrompt + "\n\n" + firstUser)
+            val title = LlmClient.of(provider).complete(provider, model, settings.titlePrompt + "\n\n" + firstUser)
                 ?.lines()?.firstOrNull()?.trim()?.take(30)
                 ?: firstUser.lines().first().take(20)
             if (title.isBlank()) return@launch
@@ -360,7 +410,7 @@ class ChatViewModel(
                 append("用户：").append(lastUser).append('\n')
                 append("助手：").append(reply.take(800))
             }
-            val raw = llm.complete(provider, model, prompt) ?: return@launch
+            val raw = LlmClient.of(provider).complete(provider, model, prompt) ?: return@launch
             val suggestions = raw.lines()
                 .map { it.trim().replace(Regex("""^[-*•\d.、)\s]+"""), "") }
                 .filter { it.isNotBlank() }
@@ -425,14 +475,13 @@ class ChatViewModel(
     }
 
     /** 直接用 baseUrl/apiKey 拉模型（设置页添加新 Provider 时） */
-    fun fetchModelsRaw(baseUrl: String, apiKey: String, onResult: (List<String>) -> Unit) {
+    fun fetchModelsRaw(baseUrl: String, apiKey: String, type: String = "openai", onResult: (List<String>) -> Unit) {
         _modelsLoading.value = true
         scope.launch {
-            val models = llm.listModels(
-                me.rerere.rikkahub.desktop.data.ProviderConfig(
-                    name = "temp", baseUrl = baseUrl, apiKey = apiKey
-                )
+            val temp = me.rerere.rikkahub.desktop.data.ProviderConfig(
+                name = "temp", baseUrl = baseUrl, apiKey = apiKey, type = type
             )
+            val models = LlmClient.of(temp).listModels(temp)
             _modelsLoading.value = false
             onResult(models)
         }
@@ -446,7 +495,7 @@ class ChatViewModel(
         val provider = settings.providers.firstOrNull { it.id == providerId } ?: return
         _modelsLoading.value = true
         scope.launch {
-            val models = llm.listModels(provider)
+            val models = LlmClient.of(provider).listModels(provider)
             _modelsLoading.value = false
             onResult(models)
         }

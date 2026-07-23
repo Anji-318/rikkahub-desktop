@@ -25,9 +25,11 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -155,6 +157,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                             selected = c.id == current?.id,
                             onClick = { vm.selectConversation(c.id) },
                             onDelete = { vm.deleteConversation(c.id) },
+                            onTogglePin = { vm.togglePinConversation(c.id) },
                         )
                     }
                 } else {
@@ -174,6 +177,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                                 selected = c.id == current?.id,
                                 onClick = { vm.selectConversation(c.id) },
                                 onDelete = { vm.deleteConversation(c.id) },
+                                onTogglePin = { vm.togglePinConversation(c.id) },
                             )
                         }
                     }
@@ -245,24 +249,39 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
             val provider = settings.providers.firstOrNull { it.id == settings.activeProviderId }
             val modelName = assistant?.chatModel ?: settings.activeModel
             Surface(color = MaterialTheme.colorScheme.surface, tonalElevation = 1.dp) {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                    Text(
-                        current?.title ?: "RikkaHub",
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        buildString {
-                            append(assistant?.name ?: "默认助手")
-                            modelName?.let { append(" / $it") }
-                            provider?.let { append(" (${it.name})") }
-                        },
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            current?.title ?: "RikkaHub",
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            buildString {
+                                append(assistant?.name ?: "默认助手")
+                                modelName?.let { append(" / $it") }
+                                provider?.let { append(" (${it.name})") }
+                            },
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    // 导出当前对话为 Markdown
+                    if (current != null) {
+                        IconButton(onClick = {
+                            vm.exportConversationMarkdown(current!!.id)?.let { md ->
+                                saveMarkdownFile(current!!.title, md)
+                            }
+                        }) {
+                            Icon(Icons.Default.Download, "导出 Markdown", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
                 }
             }
             HorizontalDivider()
@@ -624,14 +643,30 @@ private fun FavoritesView(vm: ChatViewModel, onBack: () -> Unit) {
 }
 
 @Composable
-private fun ConversationItem(c: Conversation, selected: Boolean, onClick: () -> Unit, onDelete: () -> Unit) {
+private fun ConversationItem(
+    c: Conversation,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onDelete: () -> Unit,
+    onTogglePin: () -> Unit,
+) {
     Surface(
         color = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(8.dp),
         modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp).clickable { onClick() }
     ) {
         Row(Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (c.pinned) {
+                Icon(Icons.Default.PushPin, "已置顶", Modifier.size(12.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(4.dp))
+            }
             Text(c.title, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Icon(
+                Icons.Default.PushPin, if (c.pinned) "取消置顶" else "置顶",
+                Modifier.size(14.dp).clickable { onTogglePin() },
+                tint = if (c.pinned) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            )
+            Spacer(Modifier.width(6.dp))
             Icon(Icons.Default.Delete, "删除", Modifier.size(14.dp).clickable { onDelete() }, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
         }
     }
@@ -1076,6 +1111,14 @@ private fun pickDocument(onPicked: (String, String) -> Unit) {
     if (file.extension.lowercase() !in TEXT_EXTENSIONS) return
     val text = runCatching { file.readText().take(100_000) }.getOrNull() ?: return
     onPicked(file.name, text)
+}
+
+private fun saveMarkdownFile(defaultName: String, content: String) {
+    val dialog = java.awt.FileDialog(null as java.awt.Frame?, "导出对话", java.awt.FileDialog.SAVE)
+    dialog.file = "${defaultName.take(30).ifBlank { "对话" }}.md"
+    dialog.isVisible = true
+    val fileName = dialog.file ?: return
+    File(dialog.directory, fileName).writeText(content)
 }
 
 private fun formatTime(ts: Long): String =

@@ -3,6 +3,23 @@ package me.rerere.rikkahub.desktop.data
 import kotlinx.serialization.Serializable
 import java.util.UUID
 
+/** 键值对（自定义请求头 / 请求体 / 助手正则等复用） */
+@Serializable
+data class KVEntry(
+    val key: String = "",
+    val value: String = "",
+)
+
+/** 助手正则变换规则（对齐安卓 AssistantRegex 的子集） */
+@Serializable
+data class AssistantRegex(
+    val id: String = UUID.randomUUID().toString(),
+    val find: String = "",
+    val replace: String = "",
+    val scope: String = "output", // input=发送前作用于用户输入 / output=作用于 AI 回复
+    val enabled: Boolean = true,
+)
+
 @Serializable
 data class ProviderConfig(
     val id: String = UUID.randomUUID().toString(),
@@ -11,6 +28,7 @@ data class ProviderConfig(
     val apiKey: String,
     val models: List<String> = emptyList(),
     val enabled: Boolean = true,
+    val type: String = "openai", // openai / claude / google
 )
 
 @Serializable
@@ -24,6 +42,9 @@ data class Assistant(
     val maxTokens: Int? = null, // null 不传
     val contextMessageSize: Int? = null, // 上下文消息条数，null 用默认 40
     val reasoningEffort: String? = null, // null=不设置；none/low/medium/high/xhigh
+    val regexes: List<AssistantRegex> = emptyList(), // 正则变换
+    val customHeaders: List<KVEntry> = emptyList(), // 自定义请求头
+    val customBodies: List<KVEntry> = emptyList(), // 自定义请求体（value 优先按 JSON 解析）
 )
 
 /** 界面显示设置（对齐安卓 DisplaySetting 的子集） */

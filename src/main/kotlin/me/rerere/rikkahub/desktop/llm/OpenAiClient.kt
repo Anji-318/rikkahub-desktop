@@ -28,67 +28,51 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import me.rerere.rikkahub.desktop.data.ChatMessage
+import me.rerere.rikkahub.desktop.data.KVEntry
 import me.rerere.rikkahub.desktop.data.ProviderConfig
-
-/** 流式增量：正文 / 思考链 / token 用量 */
-sealed class StreamDelta {
-    data class Content(val text: String) : StreamDelta()
-    data class Reasoning(val text: String) : StreamDelta()
-    data class Usage(val promptTokens: Int, val completionTokens: Int) : StreamDelta()
-}
 
 /**
  * OpenAI 兼容协议流式客户端（SSE）。
- * Phase 2 将替换为上游 :ai 模块的完整 Provider 体系（Claude/Gemini 原生协议）。
  */
-class OpenAiClient {
+class OpenAiClient : LlmClient {
     private val json = Json { ignoreUnknownKeys = true }
 
     private val client = HttpClient(CIO) {
         engine { requestTimeout = 300_000 }
     }
 
-    fun streamChat(
-        provider: ProviderConfig,
-        model: String,
-        history: List<ChatMessage>,
-        systemPrompt: String,
-        temperature: Double,
-        reasoningEffort: String? = null,
-        topP: Double? = null,
-        maxTokens: Int? = null,
-        contextSize: Int = 40,
-        searchContext: String? = null,
-    ): Flow<StreamDelta> = flow {
+    override fun streamChat(provider: ProviderConfig, params: ChatParams): Flow<StreamDelta> = flow {
         val url = provider.baseUrl.trimEnd('/') + "/chat/completions"
         val body = buildJsonObject {
-            put("model", model)
-            put("temperature", temperature)
-            topP?.let { put("top_p", it) }
-            maxTokens?.let { put("max_tokens", it) }
+            put("model", params.model)
+            put("temperature", params.temperature)
+            params.topP?.let { put("top_p", it) }
+            params.maxTokens?.let { put("max_tokens", it) }
             put("stream", true)
             put("stream_options", buildJsonObject { put("include_usage", true) })
-            reasoningEffort?.let { put("reasoning_effort", it) }
+            params.reasoningEffort?.let { put("reasoning_effort", it) }
             put("messages", buildJsonArray {
-                if (systemPrompt.isNotBlank()) {
+                if (params.systemPrompt.isNotBlank()) {
                     add(buildJsonObject {
                         put("role", "system")
-                        put("content", systemPrompt)
+                        put("content", params.systemPrompt)
                     })
                 }
-                searchContext?.let {
+                params.searchContext?.let {
                     add(buildJsonObject {
                         put("role", "system")
                         put("content", it)
                     })
                 }
-                history.takeLast(contextSize).forEach { msg -> add(buildMessage(msg)) }
+                params.history.takeLast(params.contextSize).forEach { msg -> add(buildMessage(msg)) }
             })
+            putCustomBodies(params.customBodies)
         }
 
         client.preparePost(url) {
             contentType(ContentType.Application.Json)
             header(HttpHeaders.Authorization, "Bearer ${provider.apiKey}")
+            params.customHeaders.forEach { header(it.key, it.value) }
             setBody(body.toString())
         }.execute { resp ->
             if (resp.status.value >= 400) {
@@ -146,8 +130,7 @@ class OpenAiClient {
         }
     }
 
-    /** 非流式短调用（生成对话建议等场景），失败返回 null */
-    suspend fun complete(provider: ProviderConfig, model: String, prompt: String): String? = runCatching {
+    override suspend fun complete(provider: ProviderConfig, model: String, prompt: String): String? = runCatching {
         val url = provider.baseUrl.trimEnd('/') + "/chat/completions"
         val body = buildJsonObject {
             put("model", model)
@@ -170,8 +153,7 @@ class OpenAiClient {
             ?.get("message")?.jsonObject?.get("content")?.jsonPrimitive?.contentOrNull
     }.getOrNull()
 
-    /** 拉取模型列表（GET /models），失败时返回空列表 */
-    suspend fun listModels(provider: ProviderConfig): List<String> = runCatching {
+    override suspend fun listModels(provider: ProviderConfig): List<String> = runCatching {
         val resp = client.get(provider.baseUrl.trimEnd('/') + "/models") {
             header(HttpHeaders.Authorization, "Bearer ${provider.apiKey}")
         }
@@ -180,3 +162,15 @@ class OpenAiClient {
             ?.jsonArray?.mapNotNull { it.jsonObject["id"]?.jsonPrimitive?.content } ?: emptyList()
     }.getOrElse { emptyList() }
 }
+
+/** 合并自定义请求体字段：value 优先按 JSON 解析，失败按字符串 */
+internal fun JsonObjectBuilderScope.putCustomBodies(entries: List<KVEntry>) {
+    val json = Json { ignoreUnknownKeys = true }
+    entries.forEach { (key, value) ->
+        if (key.isBlank()) return@forEach
+        val parsed = runCatching { json.parseToJsonElement(value) }.getOrNull()
+        if (parsed != null) put(key, parsed) else put(key, value)
+    }
+}
+
+private typealias JsonObjectBuilderScope = kotlinx.serialization.json.JsonObjectBuilder

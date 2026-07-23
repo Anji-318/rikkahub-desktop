@@ -6,8 +6,8 @@ package me.rerere.rikkahub.desktop.data
  * 首次启动时合并进用户设置，用户只需填对应 Provider 的 API Key。
  */
 
-private fun provider(id: String, name: String, baseUrl: String, models: List<String>) =
-    ProviderConfig(id = id, name = name, baseUrl = baseUrl, apiKey = "", models = models)
+private fun provider(id: String, name: String, baseUrl: String, models: List<String>, type: String = "openai") =
+    ProviderConfig(id = id, name = name, baseUrl = baseUrl, apiKey = "", models = models, type = type)
 
 val DEFAULT_PROVIDERS: List<ProviderConfig> = listOf(
     provider(
@@ -17,6 +17,14 @@ val DEFAULT_PROVIDERS: List<ProviderConfig> = listOf(
     provider(
         "1eeea727-9ee5-4cae-93e6-6fb01a4d051e", "OpenAI", "https://api.openai.com/v1",
         listOf("gpt-4o", "gpt-4o-mini")
+    ),
+    provider(
+        "a0000000-0000-4000-9000-0000000000b1", "Gemini", "https://generativelanguage.googleapis.com",
+        listOf("gemini-2.5-flash", "gemini-2.5-pro"), type = "google"
+    ),
+    provider(
+        "a0000000-0000-4000-9000-0000000000b2", "MiniMax", "https://api.minimaxi.com/anthropic/v1",
+        emptyList(), type = "claude"
     ),
     provider(
         "f099ad5b-ef03-446d-8e78-7e36787f780b", "DeepSeek", "https://api.deepseek.com/v1",
