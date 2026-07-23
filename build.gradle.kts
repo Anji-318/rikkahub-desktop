@@ -9,7 +9,7 @@ plugins {
 }
 
 group = "me.rerere.rikkahub"
-version = "0.3.0"
+version = "0.4.0"
 
 val ktorVersion = "3.1.3"
 
@@ -47,9 +47,12 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi, TargetFormat.Dmg, TargetFormat.Deb)
             packageName = "RikkaHub"
-            packageVersion = "0.3.0"
+            packageVersion = "0.4.0"
             description = "RikkaHub Desktop - LLM Chat Client"
             vendor = "rikkahub"
+            windows {
+                iconFile.set(project.file("icon.ico"))
+            }
             macOS {
                 // DMG 校验要求主版本号 > 0，0.x 版本单独指定
                 dmgPackageVersion = "1.0.0"
@@ -60,7 +63,7 @@ compose.desktop {
 
 tasks.shadowJar {
     archiveBaseName.set("rikkahub-desktop")
-    archiveVersion.set("0.3.0")
+    archiveVersion.set("0.4.0")
     mergeServiceFiles()
     manifest {
         attributes("Main-Class" to "me.rerere.rikkahub.desktop.MainKt")

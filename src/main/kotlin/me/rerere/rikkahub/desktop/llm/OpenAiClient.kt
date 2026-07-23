@@ -4,6 +4,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.request.get
 import io.ktor.client.request.header
+import io.ktor.client.request.post
 import io.ktor.client.request.preparePost
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsChannel
@@ -54,11 +55,17 @@ class OpenAiClient {
         systemPrompt: String,
         temperature: Double,
         reasoningEffort: String? = null,
+        topP: Double? = null,
+        maxTokens: Int? = null,
+        contextSize: Int = 40,
+        searchContext: String? = null,
     ): Flow<StreamDelta> = flow {
         val url = provider.baseUrl.trimEnd('/') + "/chat/completions"
         val body = buildJsonObject {
             put("model", model)
             put("temperature", temperature)
+            topP?.let { put("top_p", it) }
+            maxTokens?.let { put("max_tokens", it) }
             put("stream", true)
             put("stream_options", buildJsonObject { put("include_usage", true) })
             reasoningEffort?.let { put("reasoning_effort", it) }
@@ -69,7 +76,13 @@ class OpenAiClient {
                         put("content", systemPrompt)
                     })
                 }
-                history.takeLast(40).forEach { msg -> add(buildMessage(msg)) }
+                searchContext?.let {
+                    add(buildJsonObject {
+                        put("role", "system")
+                        put("content", it)
+                    })
+                }
+                history.takeLast(contextSize).forEach { msg -> add(buildMessage(msg)) }
             })
         }
 
@@ -132,6 +145,30 @@ class OpenAiClient {
             })
         }
     }
+
+    /** 非流式短调用（生成对话建议等场景），失败返回 null */
+    suspend fun complete(provider: ProviderConfig, model: String, prompt: String): String? = runCatching {
+        val url = provider.baseUrl.trimEnd('/') + "/chat/completions"
+        val body = buildJsonObject {
+            put("model", model)
+            put("stream", false)
+            put("messages", buildJsonArray {
+                add(buildJsonObject {
+                    put("role", "user")
+                    put("content", prompt)
+                })
+            })
+        }
+        val resp = client.post(url) {
+            contentType(ContentType.Application.Json)
+            header(HttpHeaders.Authorization, "Bearer ${provider.apiKey}")
+            setBody(body.toString())
+        }
+        if (resp.status.value >= 400) return null
+        json.parseToJsonElement(resp.bodyAsText()).jsonObject["choices"]
+            ?.jsonArray?.firstOrNull()?.jsonObject
+            ?.get("message")?.jsonObject?.get("content")?.jsonPrimitive?.contentOrNull
+    }.getOrNull()
 
     /** 拉取模型列表（GET /models），失败时返回空列表 */
     suspend fun listModels(provider: ProviderConfig): List<String> = runCatching {

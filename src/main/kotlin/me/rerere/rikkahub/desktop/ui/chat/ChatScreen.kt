@@ -3,32 +3,43 @@ package me.rerere.rikkahub.desktop.ui.chat
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
@@ -50,7 +61,9 @@ import com.mikepenz.markdown.m3.markdownTypography
 import kotlinx.coroutines.launch
 import me.rerere.rikkahub.desktop.data.ChatMessage
 import me.rerere.rikkahub.desktop.data.Conversation
+import me.rerere.rikkahub.desktop.data.DisplaySetting
 import me.rerere.rikkahub.desktop.data.MessageNode
+import me.rerere.rikkahub.desktop.data.REASONING_EFFORTS
 import java.io.File
 import java.text.SimpleDateFormat
 import java.time.Instant
@@ -68,8 +81,12 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
     val streamingText by vm.streamingText.collectAsState()
     val streamingReasoning by vm.streamingReasoning.collectAsState()
     val error by vm.error.collectAsState()
-    val settings by vm.settings.collectAsState()
+    val settings = vm.settings
     val pendingImages by vm.pendingImages.collectAsState()
+    val pendingDocuments by vm.pendingDocuments.collectAsState()
+    val translation by vm.translation.collectAsState()
+    val translationLoading by vm.translationLoading.collectAsState()
+    var showFavorites by remember { mutableStateOf(false) }
 
     Row(Modifier.fillMaxSize()) {
         // ===== 左侧会话栏 =====
@@ -78,6 +95,24 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                 .background(MaterialTheme.colorScheme.surfaceVariant)
                 .padding(10.dp)
         ) {
+            // 用户信息（点击编辑昵称/头像）
+            var showProfileEditor by remember { mutableStateOf(false) }
+            Row(
+                Modifier.fillMaxWidth().clickable { showProfileEditor = true }.padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                UserAvatar(settings.userNickname, settings.userAvatar, 36.dp)
+                Spacer(Modifier.width(10.dp))
+                Column {
+                    Text(settings.userNickname, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(greeting(), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            if (showProfileEditor) {
+                ProfileEditDialog(vm = vm, onDismiss = { showProfileEditor = false })
+            }
+            Spacer(Modifier.height(10.dp))
+
             Button(
                 onClick = { vm.newConversation() },
                 modifier = Modifier.fillMaxWidth(),
@@ -173,6 +208,11 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                     settings.assistants.forEach { a ->
                         DropdownMenuItem(
                             text = { Text(a.name, fontSize = 13.sp) },
+                            trailingIcon = {
+                                if (a.id == settings.activeAssistantId) {
+                                    Icon(Icons.Default.Check, "当前", Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
+                                }
+                            },
                             onClick = { vm.selectAssistant(a.id); assistantMenu = false }
                         )
                     }
@@ -187,10 +227,18 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                 Spacer(Modifier.width(8.dp))
                 Text("设置", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            Row(
+                Modifier.fillMaxWidth().clickable { showFavorites = true }.padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.Star, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.width(8.dp))
+                Text("收藏夹", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
 
         // ===== 右侧聊天区 =====
-        Column(Modifier.weight(1f).fillMaxHeight()) {
+        Column(Modifier.weight(1f).fillMaxHeight().background(MaterialTheme.colorScheme.background)) {
             // 顶栏：标题 + 助手/模型/Provider
             val assistant = current?.assistantId?.let { id -> settings.assistants.firstOrNull { it.id == id } }
                 ?: settings.activeAssistant()
@@ -245,10 +293,15 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                             node = node,
                             streaming = false,
                             isLast = node.id == displayNodes.lastOrNull()?.id && !streaming,
+                            userNickname = settings.userNickname,
+                            userAvatar = settings.userAvatar,
+                            ds = settings.displaySetting,
                             onDelete = { vm.deleteMessage(m.id) },
                             onRegenerate = { vm.regenerate() },
                             onEditResend = { newText -> vm.editAndResend(m.id, newText) },
                             onSelectBranch = { idx -> vm.selectBranch(node.id, idx) },
+                            onTranslate = { vm.translateMessage(m.content) },
+                            onToggleFavorite = { vm.toggleFavorite(m.id) },
                         )
                     }
                 }
@@ -264,6 +317,7 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                             node = null,
                             streaming = true,
                             isLast = true,
+                            ds = settings.displaySetting,
                             onDelete = {}, onRegenerate = {}, onEditResend = {},
                         )
                     }
@@ -322,6 +376,49 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                             }
                         }
                     }
+                    // 待发送文档
+                    if (pendingDocuments.isNotEmpty()) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.padding(vertical = 4.dp)
+                        ) {
+                            pendingDocuments.forEachIndexed { idx, (name, _) ->
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Row(
+                                        Modifier.padding(start = 8.dp, end = 2.dp, top = 3.dp, bottom = 3.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(Icons.Default.Description, null, Modifier.size(13.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Spacer(Modifier.width(4.dp))
+                                        Text(name, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 140.dp))
+                                        Icon(
+                                            Icons.Default.Close, "移除",
+                                            Modifier.size(14.dp).clickable { vm.removePendingDocument(idx) },
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // 对话建议（生成完成后推荐）
+                    val suggestions = current?.chatSuggestions ?: emptyList()
+                    if (suggestions.isNotEmpty() && !streaming) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 4.dp)
+                        ) {
+                            suggestions.forEach { s ->
+                                SuggestionChip(
+                                    onClick = { vm.send(s) },
+                                    label = { Text(s, fontSize = 12.sp, maxLines = 1) }
+                                )
+                            }
+                        }
+                    }
                     TextField(
                         value = input,
                         onValueChange = { input = it },
@@ -342,20 +439,51 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                         maxLines = 6,
                     )
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        // 附件（图片）
-                        IconButton(onClick = { pickImage { vm.addPendingImage(it) } }) {
-                            Icon(Icons.Default.Add, "添加图片", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        // 附件菜单（图片 / 上传文件）
+                        var attachMenu by remember { mutableStateOf(false) }
+                        Box {
+                            IconButton(onClick = { attachMenu = true }) {
+                                Icon(Icons.Default.Add, "附件", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("图片", fontSize = 13.sp) },
+                                    onClick = { attachMenu = false; pickImage { vm.addPendingImage(it) } }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("上传文件", fontSize = 13.sp) },
+                                    onClick = { attachMenu = false; pickDocument { n, t -> vm.addPendingDocument(n, t) } }
+                                )
+                            }
                         }
-                        // 模型选择
+                        // 快捷消息（点击插入输入框）
+                        if (settings.quickMessages.isNotEmpty()) {
+                            var qmMenu by remember { mutableStateOf(false) }
+                            Box {
+                                IconButton(onClick = { qmMenu = true }) {
+                                    Icon(Icons.Default.Bolt, "快捷消息", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                DropdownMenu(expanded = qmMenu, onDismissRequest = { qmMenu = false }) {
+                                    settings.quickMessages.forEach { qm ->
+                                        DropdownMenuItem(
+                                            text = { Text(qm.title.ifBlank { qm.content.take(20) }, fontSize = 12.sp) },
+                                            onClick = { input = qm.content; qmMenu = false }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        // 模型选择（显示生效模型：助手覆盖 > 全局）
                         if (provider != null && provider.models.isNotEmpty()) {
                             var modelMenu by remember { mutableStateOf(false) }
+                            val effectiveModel = assistant?.chatModel ?: settings.activeModel
                             Box {
                                 Row(
                                     Modifier.clickable { modelMenu = true }.padding(horizontal = 8.dp, vertical = 4.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        settings.activeModel ?: "选择模型",
+                                        effectiveModel ?: "选择模型",
                                         fontSize = 12.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1
@@ -366,27 +494,31 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                                     provider.models.forEach { m ->
                                         DropdownMenuItem(
                                             text = { Text(m, fontSize = 12.sp) },
+                                            trailingIcon = {
+                                                if (m == effectiveModel) {
+                                                    Icon(Icons.Default.Check, "当前", Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
+                                                }
+                                            },
                                             onClick = { vm.switchModel(m); modelMenu = false }
                                         )
                                     }
                                 }
                             }
                         }
-                        // 推理力度
+                        // 推理力度（与 Android 版 ReasoningLevel 对齐）
                         run {
                             var effortMenu by remember { mutableStateOf(false) }
-                            val efforts = listOf(null to "默认推理", "low" to "轻度推理", "medium" to "中度推理", "high" to "深度推理")
-                            val currentEffort = efforts.firstOrNull { it.first == assistant?.reasoningEffort }?.second ?: "默认推理"
+                            val currentEffort = REASONING_EFFORTS.firstOrNull { it.first == assistant?.reasoningEffort }?.second ?: "自动"
                             Box {
                                 Row(
                                     Modifier.clickable { effortMenu = true }.padding(horizontal = 8.dp, vertical = 4.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Text(currentEffort, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("推理: $currentEffort", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     Icon(Icons.Default.ArrowDropDown, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                                 DropdownMenu(expanded = effortMenu, onDismissRequest = { effortMenu = false }) {
-                                    efforts.forEach { (effort, label) ->
+                                    REASONING_EFFORTS.forEach { (effort, label) ->
                                         DropdownMenuItem(
                                             text = { Text(label, fontSize = 12.sp) },
                                             onClick = { vm.setAssistantReasoningEffort(effort); effortMenu = false }
@@ -409,6 +541,81 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                                 Icon(Icons.AutoMirrored.Filled.Send, "发送", Modifier.size(18.dp))
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // ===== 收藏夹（覆盖层） =====
+    if (showFavorites) {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            FavoritesView(
+                vm = vm,
+                onBack = { showFavorites = false },
+            )
+        }
+    }
+
+    // ===== 翻译弹窗 =====
+    translation?.let { result ->
+        AlertDialog(
+            onDismissRequest = { vm.dismissTranslation() },
+            title = { Text("翻译") },
+            text = {
+                if (translationLoading) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(10.dp))
+                        Text("翻译中…", fontSize = 13.sp)
+                    }
+                } else {
+                    SelectionContainer { Text(result, fontSize = 14.sp, lineHeight = 22.sp) }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { vm.dismissTranslation() }) { Text("关闭") }
+            }
+        )
+    }
+}
+
+@Composable
+private fun FavoritesView(vm: ChatViewModel, onBack: () -> Unit) {
+    val favorites = vm.favoriteMessages()
+    Column(Modifier.fillMaxSize().padding(20.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
+            Text("收藏夹", style = MaterialTheme.typography.titleLarge)
+        }
+        Spacer(Modifier.height(12.dp))
+        if (favorites.isEmpty()) {
+            Text("暂无收藏消息", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(favorites) { (conv, msg, _) ->
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    tonalElevation = 1.dp,
+                    modifier = Modifier.fillMaxWidth().clickable {
+                        vm.selectConversation(conv.id)
+                        onBack()
+                    }
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                conv.title,
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(formatTime(msg.createdAt), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(msg.content, fontSize = 13.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
                     }
                 }
             }
@@ -440,19 +647,30 @@ private fun MessageRow(
     onRegenerate: () -> Unit,
     onEditResend: (String) -> Unit,
     onSelectBranch: (Int) -> Unit = {},
+    userNickname: String = "用户",
+    userAvatar: String = "",
+    ds: DisplaySetting = DisplaySetting(),
+    onTranslate: () -> Unit = {},
+    onToggleFavorite: () -> Unit = {},
 ) {
     val isUser = message.role == "user"
     val clipboard = LocalClipboardManager.current
     var editing by remember { mutableStateOf(false) }
     var editText by remember { mutableStateOf(message.content) }
+    val bodyFontSize = 14.sp * ds.fontSizeRatio
+    val bodyLineHeight = 22.sp * ds.fontSizeRatio
 
     if (isUser) {
         // ===== 用户消息（右对齐） =====
         Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("我", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(userNickname, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (ds.showDateTimeInMessage) {
+                    Spacer(Modifier.width(8.dp))
+                    Text(formatTime(message.createdAt), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                }
                 Spacer(Modifier.width(8.dp))
-                Text(formatTime(message.createdAt), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                UserAvatar(userNickname, userAvatar, 24.dp)
             }
             Spacer(Modifier.height(4.dp))
             Surface(
@@ -483,8 +701,8 @@ private fun MessageRow(
                     } else if (message.content.isNotBlank()) {
                         Text(
                             message.content,
-                            fontSize = 14.sp,
-                            lineHeight = 22.sp,
+                            fontSize = bodyFontSize,
+                            lineHeight = bodyLineHeight,
                             color = MaterialTheme.colorScheme.onPrimaryContainer
                         )
                     }
@@ -495,6 +713,8 @@ private fun MessageRow(
                 onEdit = if (!streaming && !editing) ({ editing = true; editText = message.content }) else null,
                 onRegenerate = null,
                 onDelete = if (!streaming) onDelete else null,
+                onFavorite = if (!streaming) onToggleFavorite else null,
+                favorite = message.favorite,
             )
             BranchSwitcher(node, onSelectBranch)
         }
@@ -502,31 +722,38 @@ private fun MessageRow(
         // ===== AI 消息（左对齐，带头像） =====
         Row(Modifier.fillMaxWidth()) {
             // 头像：模型名首字符
-            Box(
-                Modifier.size(32.dp).background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    (message.model ?: "AI").take(1).uppercase(),
-                    fontSize = 14.sp,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                )
+            if (ds.showModelIcon) {
+                Box(
+                    Modifier.size(32.dp).background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        (message.model ?: "AI").take(1).uppercase(),
+                        fontSize = 14.sp,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
             }
-            Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(message.model ?: "assistant", fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Spacer(Modifier.width(8.dp))
-                    Text(formatTime(message.createdAt), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                    if (ds.showModelName) {
+                        Text(message.model ?: "assistant", fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    if (ds.showDateTimeInMessage) {
+                        if (ds.showModelName) Spacer(Modifier.width(8.dp))
+                        Text(formatTime(message.createdAt), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                    }
                 }
                 Spacer(Modifier.height(4.dp))
 
                 // 思考链（可折叠）
-                if (message.reasoning.isNotBlank() || (streaming && message.content.isBlank())) {
+                if (ds.showThinkingContent && (message.reasoning.isNotBlank() || (streaming && message.content.isBlank()))) {
                     ThinkingCard(
                         reasoning = message.reasoning,
                         reasoningMs = message.reasoningMs,
-                        thinking = streaming && message.content.isBlank()
+                        thinking = streaming && message.content.isBlank(),
+                        defaultCollapsed = ds.autoCloseThinking,
                     )
                     Spacer(Modifier.height(6.dp))
                 }
@@ -540,13 +767,13 @@ private fun MessageRow(
                     ) {
                         Box(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
                             if (streaming && message.content.isBlank()) {
-                                Text("▍", fontSize = 14.sp)
+                                Text("▍", fontSize = bodyFontSize)
                             } else {
                                 Markdown(
                                     content = message.content,
                                     colors = markdownColor(text = MaterialTheme.colorScheme.onSurface),
                                     typography = markdownTypography(
-                                        text = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp, lineHeight = 22.sp)
+                                        text = MaterialTheme.typography.bodyMedium.copy(fontSize = bodyFontSize, lineHeight = bodyLineHeight)
                                     ),
                                 )
                             }
@@ -555,7 +782,7 @@ private fun MessageRow(
                 }
 
                 // token 用量 / 速度 / 耗时
-                if (!isUser && (message.promptTokens != null || message.completionTokens != null)) {
+                if (ds.showTokenUsage && (message.promptTokens != null || message.completionTokens != null)) {
                     Text(
                         buildString {
                             append("↑ ${message.promptTokens ?: 0} tokens · ↓ ${message.completionTokens ?: 0} tokens")
@@ -577,6 +804,9 @@ private fun MessageRow(
                     onEdit = null,
                     onRegenerate = if (isLast && !streaming) onRegenerate else null,
                     onDelete = if (!streaming) onDelete else null,
+                    onTranslate = if (!streaming && message.content.isNotBlank()) onTranslate else null,
+                    onFavorite = if (!streaming) onToggleFavorite else null,
+                    favorite = message.favorite,
                 )
                 BranchSwitcher(node, onSelectBranch)
             }
@@ -590,10 +820,28 @@ private fun MessageActions(
     onEdit: (() -> Unit)?,
     onRegenerate: (() -> Unit)?,
     onDelete: (() -> Unit)?,
+    onTranslate: (() -> Unit)? = null,
+    onFavorite: (() -> Unit)? = null,
+    favorite: Boolean = false,
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(2.dp), modifier = Modifier.padding(top = 2.dp)) {
         IconButton(onClick = onCopy, modifier = Modifier.size(26.dp)) {
             Icon(Icons.Default.ContentCopy, "复制", Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (onTranslate != null) {
+            IconButton(onClick = onTranslate, modifier = Modifier.size(26.dp)) {
+                Icon(Icons.Default.Translate, "翻译", Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        if (onFavorite != null) {
+            IconButton(onClick = onFavorite, modifier = Modifier.size(26.dp)) {
+                Icon(
+                    if (favorite) Icons.Default.Star else Icons.Default.StarBorder,
+                    if (favorite) "取消收藏" else "收藏",
+                    Modifier.size(14.dp),
+                    tint = if (favorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
         if (onEdit != null) {
             IconButton(onClick = onEdit, modifier = Modifier.size(26.dp)) {
@@ -636,8 +884,8 @@ private fun BranchSwitcher(node: MessageNode?, onSelectBranch: (Int) -> Unit) {
 }
 
 @Composable
-private fun ThinkingCard(reasoning: String, reasoningMs: Long?, thinking: Boolean) {
-    var expanded by remember { mutableStateOf(false) }
+private fun ThinkingCard(reasoning: String, reasoningMs: Long?, thinking: Boolean, defaultCollapsed: Boolean = true) {
+    var expanded by remember { mutableStateOf(!defaultCollapsed) }
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(8.dp),
@@ -685,6 +933,109 @@ private fun DataUrlImage(dataUrl: String, modifier: Modifier = Modifier) {
     }
 }
 
+/** 用户头像：有自定义头像显示图片，否则显示昵称首字符 */
+@Composable
+private fun UserAvatar(nickname: String, avatar: String, size: androidx.compose.ui.unit.Dp) {
+    if (avatar.isNotBlank()) {
+        DataUrlImage(avatar, Modifier.size(size).clip(CircleShape))
+    } else {
+        Box(
+            Modifier.size(size).background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                nickname.take(1).ifEmpty { "用" },
+                fontSize = (size.value * 0.42).sp,
+                color = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+        }
+    }
+}
+
+@Composable
+private fun ProfileEditDialog(vm: ChatViewModel, onDismiss: () -> Unit) {
+    val settings = vm.settings
+    var nickname by remember { mutableStateOf(settings.userNickname) }
+    var avatar by remember { mutableStateOf(settings.userAvatar) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("个人信息") },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                UserAvatar(nickname.ifBlank { "用户" }, avatar, 64.dp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { pickAvatar { avatar = it } }) { Text("更换头像", fontSize = 12.sp) }
+                    if (avatar.isNotBlank()) {
+                        OutlinedButton(onClick = { avatar = "" }) { Text("重置", fontSize = 12.sp) }
+                    }
+                }
+                OutlinedTextField(
+                    value = nickname,
+                    onValueChange = { nickname = it },
+                    label = { Text("昵称") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = {
+                vm.updateSettings {
+                    userNickname = nickname.ifBlank { "用户" }
+                    userAvatar = avatar
+                }
+                vm.refreshSettings()
+                onDismiss()
+            }) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+private fun greeting(): String = when (java.time.LocalTime.now().hour) {
+    in 5..10 -> "早上好"
+    in 11..13 -> "中午好"
+    in 14..17 -> "下午好"
+    else -> "晚上好"
+}
+
+private fun pickAvatar(onPicked: (String) -> Unit) {
+    val dialog = java.awt.FileDialog(null as java.awt.Frame?, "选择头像", java.awt.FileDialog.LOAD)
+    dialog.setFilenameFilter { _, name ->
+        name.lowercase().let { n ->
+            n.endsWith(".png") || n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".webp")
+        }
+    }
+    dialog.isVisible = true
+    val fileName = dialog.file ?: return
+    val bytes = File(dialog.directory, fileName).readBytes()
+    onPicked(makeAvatarDataUrl(bytes))
+}
+
+/** 头像统一缩放为 128×128 PNG，避免 settings.json 里塞进大图 */
+private fun makeAvatarDataUrl(bytes: ByteArray): String = runCatching {
+    val src = javax.imageio.ImageIO.read(java.io.ByteArrayInputStream(bytes))
+    val size = 128
+    val scaled = java.awt.image.BufferedImage(size, size, java.awt.image.BufferedImage.TYPE_INT_ARGB)
+    val g = scaled.createGraphics()
+    g.setRenderingHint(
+        java.awt.RenderingHints.KEY_INTERPOLATION,
+        java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR
+    )
+    g.drawImage(src, 0, 0, size, size, null)
+    g.dispose()
+    val baos = java.io.ByteArrayOutputStream()
+    javax.imageio.ImageIO.write(scaled, "png", baos)
+    "data:image/png;base64," + Base64.getEncoder().encodeToString(baos.toByteArray())
+}.getOrElse {
+    "data:image/png;base64," + Base64.getEncoder().encodeToString(bytes)
+}
+
 private fun decodeDataUrl(dataUrl: String): ImageBitmap? = runCatching {
     val bytes = Base64.getDecoder().decode(dataUrl.substringAfter(","))
     org.jetbrains.skia.Image.makeFromEncoded(bytes).toComposeImageBitmap()
@@ -708,6 +1059,23 @@ private fun pickImage(onPicked: (String) -> Unit) {
         else -> "image/png"
     }
     onPicked("data:$mime;base64," + Base64.getEncoder().encodeToString(bytes))
+}
+
+/** 可作为提示词上传的文本类扩展名 */
+private val TEXT_EXTENSIONS = setOf(
+    "txt", "md", "markdown", "json", "csv", "xml", "yaml", "yml", "log", "toml", "ini", "conf", "properties",
+    "kt", "kts", "java", "py", "js", "ts", "tsx", "jsx", "html", "htm", "css", "sql", "sh", "bat",
+    "c", "h", "cpp", "hpp", "go", "rs", "rb", "php", "swift", "vue", "gradle", "tex"
+)
+
+private fun pickDocument(onPicked: (String, String) -> Unit) {
+    val dialog = java.awt.FileDialog(null as java.awt.Frame?, "上传文件", java.awt.FileDialog.LOAD)
+    dialog.isVisible = true
+    val fileName = dialog.file ?: return
+    val file = File(dialog.directory, fileName)
+    if (file.extension.lowercase() !in TEXT_EXTENSIONS) return
+    val text = runCatching { file.readText().take(100_000) }.getOrNull() ?: return
+    onPicked(file.name, text)
 }
 
 private fun formatTime(ts: Long): String =
