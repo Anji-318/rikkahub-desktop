@@ -6,7 +6,7 @@ on:
       tag:
         description: '发布标签（同名自动覆盖旧 Release）'
         required: true
-        default: 'v0.3.0-desktop'
+        default: 'v0.5.0-desktop'
 
 permissions:
   contents: write      # 允许创建/删除 Release
