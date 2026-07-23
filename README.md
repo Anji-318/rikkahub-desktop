@@ -6,39 +6,46 @@ UI 方案借鉴自 `rikkahub-desktop-native` 参考项目，并逐步对齐 Andr
 
 ## 已实现
 
-- ✅ 原生窗口（1280×800，最小 960×600）
+- ✅ 原生窗口（1280×800，最小 960×600）+ 应用图标（窗口/exe/安装包）+ 单实例锁
 - ✅ 会话侧栏：新建/搜索/删除会话、按日期分组（今天/昨天/x月x日），JSON 文件持久化
+- ✅ 用户信息：昵称/头像编辑（头像自动缩放 128px）+ 时段问候语，持久化
 - ✅ 聊天主界面：消息气泡、Markdown 渲染、流式输出实时渲染、自动滚动、停止生成
 - ✅ 消息分支：重新生成/编辑会产生新分支变体，可 ◀ 1/2 ▶ 切换（与 Android 版 MessageNode 对齐）
 - ✅ 思考链（reasoning）解析与折叠展示（含思考耗时）、token 用量/速度/生成耗时显示
+- ✅ 消息操作：复制/编辑/重新生成/删除/翻译/收藏（收藏夹跨会话浏览）
 - ✅ 图片附件：文件选择 → base64 多模态消息（OpenAI vision）
-- ✅ 多助手：增删改、system prompt、绑定模型、推理力度（low/medium/high），会话级助手绑定
-- ✅ 消息区：模型头像 + 名称 + 时间戳、常驻操作栏（复制/编辑/重新生成/删除）
-- ✅ 输入栏：卡片式，模型选择 / 推理力度下拉
-- ✅ Provider 设置：增删改查、启用切换、模型选择、一键拉取模型列表、系统提示词、温度滑条
+- ✅ 文件上传：文本类文档（代码/md/json 等 40+ 扩展名）作为提示词附件
+- ✅ 快捷消息：设置页管理，输入栏一键插入
+- ✅ 对话建议：生成完成后推荐 4 条快捷回复（对齐 Android generateSuggestion）
+- ✅ AI 标题：首轮对话后自动生成会话标题（对齐 Android generateTitle）
+- ✅ 联网搜索：Tavily / Exa，结果注入上下文（对齐安卓 search 模块子集）
+- ✅ 多助手：增删改、system prompt、绑定模型、完整模型参数（temperature/topP/maxTokens/上下文条数）、推理力度六档
+- ✅ 预置 19 个 OpenAI 兼容 Provider（与安卓 21 个对齐，Gemini 原生协议与 Claude 协议的 MiniMax 除外）
+- ✅ 预置 4 个内置助手（通用/翻译/代码/写作）
+- ✅ 默认模型分配：标题/建议/翻译可独立指定模型（对齐安卓 SettingModelPage 子集）
+- ✅ 显示设置：字号倍率、消息时间戳/模型头像/模型名/token 用量/思考链开关
 - ✅ 主题：浅色/深色/跟随系统 + 6 套预设配色（暖橙/樱花/海洋/春日/秋日/暗黑，移植自 Android 版）
-- ✅ OpenAI 兼容协议流式客户端（DeepSeek/硅基流动/Kimi/OpenAI/聚合网关）
+- ✅ 输入栏：卡片式，附件菜单 / 快捷消息 / 模型选择 / 推理力度下拉
 - ✅ 跨平台数据目录（%APPDATA% / Application Support / XDG）
 
 ## 路线图（与 Android 版的差距）
 
-- ⏳ 自定义主题颜色（primary/secondary/tertiary + 导入导出）
-- ⏳ 附件（图片/文档）、联网搜索、推理强度设置
-- ⏳ 助手进阶：topP/context size/maxTokens、自定义请求头/体、正则变换、提示词注入、记忆
-- ⏳ 接入上游 `:ai` 模块（Claude/Gemini 原生协议、MCP、工具调用）
-- ⏳ 显示设置：字号倍率、字体、代码块行号/折行、LaTeX、聊天背景
-- ⏳ TTS/ASR、Workspace 沙箱、备份同步、Token 统计、翻译器、图片生成
-- ⏳ 系统托盘、快捷键、原生安装包（`./gradlew packageDistributionForCurrentOS`）
+- ⏳ Claude/Gemini 原生协议（含 prompt caching、Responses API）
+- ⏳ 助手进阶：自定义请求头/体、正则变换、提示词注入（mode/lorebook）、记忆
+- ⏳ 自定义主题颜色（HSL 编辑器 + 导入导出）、LaTeX、代码块行号/折行、字体
+- ⏳ 更多搜索服务（Brave/SearXNG/智谱等 16 种）、搜索深度选项
+- ⏳ MCP、TTS/ASR、Workspace 沙箱、备份同步（WebDAV/S3）、Token 统计、图片生成
+- ⏳ 系统托盘、快捷键
 
 ## 运行
 
 ```bash
-# 开发模式运行（在本目录或仓库根目录均可）
-../gradlew run
+# 开发模式运行
+./gradlew run
 
 # 打 fatJar
-../gradlew shadowJar
-java -jar build/libs/rikkahub-desktop-0.3.0-all.jar
+./gradlew shadowJar
+java -jar build/libs/rikkahub-desktop-0.4.0-all.jar
 ```
 
 > 本目录自带 `settings.gradle.kts`，既可作为独立 Gradle 项目构建，

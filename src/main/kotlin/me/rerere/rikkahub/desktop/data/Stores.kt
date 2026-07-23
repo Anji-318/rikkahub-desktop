@@ -31,8 +31,40 @@ class SettingsStore {
         if (file.exists()) json.decodeFromString<AppSettings>(file.readText()) else AppSettings()
     }.getOrElse { AppSettings() }.also { normalize(it) }
 
-    /** 保证至少有一个助手，并修正 activeAssistantId */
+    /**
+     * 启动时合并预置数据（保留用户已填的 apiKey、自建 Provider/助手）：
+     * 1. 补齐缺失的预置 Provider 及其模型
+     * 2. 补齐缺失的内置助手
+     * 3. 修正 activeProviderId / activeModel / activeAssistantId
+     */
     private fun normalize(s: AppSettings) {
+        // Provider：缺的补整个，已有的补缺的模型
+        val mergedProviders = s.providers.map { user ->
+            val preset = DEFAULT_PROVIDERS.find { it.id == user.id } ?: return@map user
+            val missingModels = preset.models.filter { it !in user.models }
+            if (missingModels.isEmpty()) user else user.copy(models = user.models + missingModels)
+        }.toMutableList()
+        DEFAULT_PROVIDERS.forEach { preset ->
+            if (mergedProviders.none { it.id == preset.id }) mergedProviders.add(preset)
+        }
+        if (mergedProviders != s.providers) {
+            s.providers.clear()
+            s.providers.addAll(mergedProviders)
+        }
+        if (s.activeProviderId == null || s.providers.none { it.id == s.activeProviderId }) {
+            s.activeProviderId = s.providers.firstOrNull()?.id
+        }
+        if (s.activeModel == null) {
+            s.activeModel = s.providers.firstOrNull { it.id == s.activeProviderId }?.models?.firstOrNull()
+        }
+
+        // 助手：补齐内置助手（首次启动把"默认助手"替换为预置组）
+        if (s.assistants.size == 1 && s.assistants[0].name == "默认助手" && s.assistants[0].systemPrompt.isEmpty()) {
+            s.assistants.clear()
+        }
+        BUILT_IN_ASSISTANTS.forEach { preset ->
+            if (s.assistants.none { it.id == preset.id }) s.assistants.add(preset)
+        }
         if (s.assistants.isEmpty()) {
             s.assistants.add(Assistant(name = "默认助手"))
         }
@@ -44,6 +76,7 @@ class SettingsStore {
     @Synchronized
     fun update(block: AppSettings.() -> Unit): AppSettings {
         settings.apply(block)
+        settings.rev += 1
         file.writeText(json.encodeToString(AppSettings.serializer(), settings))
         return settings
     }

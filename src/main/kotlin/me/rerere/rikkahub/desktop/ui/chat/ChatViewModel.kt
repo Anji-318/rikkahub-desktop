@@ -9,6 +9,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.launch
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import me.rerere.rikkahub.desktop.data.AppSettings
 import me.rerere.rikkahub.desktop.data.ChatMessage
 import me.rerere.rikkahub.desktop.data.Conversation
@@ -16,6 +19,7 @@ import me.rerere.rikkahub.desktop.data.ConversationStore
 import me.rerere.rikkahub.desktop.data.MessageNode
 import me.rerere.rikkahub.desktop.data.SettingsStore
 import me.rerere.rikkahub.desktop.llm.OpenAiClient
+import me.rerere.rikkahub.desktop.llm.SearchClient
 import me.rerere.rikkahub.desktop.llm.StreamDelta
 import java.util.UUID
 
@@ -23,6 +27,7 @@ class ChatViewModel(
     val settingsStore: SettingsStore = SettingsStore(),
     val conversationStore: ConversationStore = ConversationStore(),
     private val llm: OpenAiClient = OpenAiClient(),
+    private val searchClient: SearchClient = SearchClient(),
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -32,8 +37,9 @@ class ChatViewModel(
     private val _current = MutableStateFlow(_conversations.value.firstOrNull())
     val current: StateFlow<Conversation?> = _current
 
-    private val _settings = MutableStateFlow(settingsStore.settings)
-    val settings: StateFlow<AppSettings> = _settings
+    // 设置用 Compose 快照状态直接观察（不走 StateFlow，杜绝发射被吞的可能）
+    var settings by mutableStateOf(settingsStore.settings.copy())
+        private set
 
     private val _streaming = MutableStateFlow(false)
     val streaming: StateFlow<Boolean> = _streaming
@@ -51,25 +57,88 @@ class ChatViewModel(
     private val _pendingImages = MutableStateFlow<List<String>>(emptyList())
     val pendingImages: StateFlow<List<String>> = _pendingImages
 
+    /** 待发送的文档附件（文件名 to 文本内容） */
+    private val _pendingDocuments = MutableStateFlow<List<Pair<String, String>>>(emptyList())
+    val pendingDocuments: StateFlow<List<Pair<String, String>>> = _pendingDocuments
+
     fun addPendingImage(dataUrl: String) { _pendingImages.value = _pendingImages.value + dataUrl }
     fun removePendingImage(index: Int) {
         _pendingImages.value = _pendingImages.value.filterIndexed { i, _ -> i != index }
     }
 
+    fun addPendingDocument(name: String, text: String) { _pendingDocuments.value = _pendingDocuments.value + (name to text) }
+    fun removePendingDocument(index: Int) {
+        _pendingDocuments.value = _pendingDocuments.value.filterIndexed { i, _ -> i != index }
+    }
+
     private var streamJob: Job? = null
 
-    fun refreshSettings() { _settings.value = settingsStore.settings }
+    /** 翻译结果（null=无弹窗） */
+    private val _translation = MutableStateFlow<String?>(null)
+    val translation: StateFlow<String?> = _translation
+
+    private val _translationLoading = MutableStateFlow(false)
+    val translationLoading: StateFlow<Boolean> = _translationLoading
+
+    fun dismissTranslation() { _translation.value = null }
+
+    /** 翻译消息（对齐安卓 translateMessage）：独立非流式调用，弹窗展示 */
+    fun translateMessage(content: String) {
+        if (_translationLoading.value) return
+        val provider = settingsStore.activeProvider() ?: run { _error.value = "请先在设置中添加 Provider"; return }
+        val model = settings.translateModelId ?: settings.activeModel ?: provider.models.firstOrNull()
+            ?: run { _error.value = "未选择模型"; return }
+        _translation.value = ""
+        _translationLoading.value = true
+        scope.launch {
+            val result = llm.complete(provider, model, settings.translatePrompt + "\n\n" + content.take(4000))
+            _translationLoading.value = false
+            _translation.value = result ?: "翻译失败，请检查模型配置"
+        }
+    }
+
+    /** 收藏/取消收藏消息（持久化在会话 JSON 里） */
+    fun toggleFavorite(messageId: String) {
+        val conv = _current.value ?: return
+        conv.messageNodes.forEach { node ->
+            val idx = node.messages.indexOfFirst { it.id == messageId }
+            if (idx >= 0) {
+                node.messages[idx] = node.messages[idx].copy(favorite = !node.messages[idx].favorite)
+            }
+        }
+        conversationStore.save(conv)
+        _current.value = conversationStore.get(conv.id)
+    }
+
+    /** 全部收藏消息（跨会话，收藏夹视图用） */
+    fun favoriteMessages(): List<Triple<Conversation, ChatMessage, MessageNode>> =
+        _conversations.value.flatMap { conv ->
+            conv.messageNodes.flatMap { node ->
+                node.messages.filter { it.favorite }.map { Triple(conv, it, node) }
+            }
+        }.sortedByDescending { it.second.createdAt }
+
+    fun refreshSettings() { settings = settingsStore.settings.copy() }
+
+    /** 更新设置并刷新 UI；保存失败显示到错误条（不再静默吞异常） */
+    fun updateSettings(block: AppSettings.() -> Unit) {
+        runCatching { settingsStore.update(block) }
+            .onSuccess { refreshSettings() }
+            .onFailure {
+                it.printStackTrace()
+                _error.value = "设置保存失败: ${it.message}"
+            }
+    }
 
     fun newConversation() {
-        val c = conversationStore.create(assistantId = _settings.value.activeAssistantId)
+        val c = conversationStore.create(assistantId = settings.activeAssistantId)
         _conversations.value = conversationStore.list()
         _current.value = c
     }
 
     /** 切换当前助手（影响之后新建的会话） */
     fun selectAssistant(id: String) {
-        settingsStore.update { activeAssistantId = id }
-        refreshSettings()
+        updateSettings { activeAssistantId = id }
     }
 
     fun selectConversation(id: String) {
@@ -82,42 +151,58 @@ class ChatViewModel(
         if (_current.value?.id == id) _current.value = _conversations.value.firstOrNull()
     }
 
-    /** 切换全局聊天模型（输入栏模型下拉） */
+    /** 切换全局聊天模型（输入栏模型下拉），同时清掉当前助手的模型覆盖使选择立即生效 */
     fun switchModel(model: String) {
-        settingsStore.update { activeModel = model }
-        refreshSettings()
+        val assistantId = _current.value?.assistantId ?: settings.activeAssistantId
+        updateSettings {
+            activeModel = model
+            val idx = assistants.indexOfFirst { it.id == assistantId }
+            if (idx >= 0 && assistants[idx].chatModel != null) {
+                assistants[idx] = assistants[idx].copy(chatModel = null)
+            }
+        }
     }
 
     /** 设置当前助手的推理力度（输入栏推理下拉） */
     fun setAssistantReasoningEffort(effort: String?) {
-        val id = _current.value?.assistantId ?: _settings.value.activeAssistantId ?: return
-        settingsStore.update {
+        val id = _current.value?.assistantId ?: settings.activeAssistantId ?: return
+        updateSettings {
             val idx = assistants.indexOfFirst { it.id == id }
             if (idx >= 0) assistants[idx] = assistants[idx].copy(reasoningEffort = effort)
         }
-        refreshSettings()
     }
 
     fun send(text: String) {
         if (_streaming.value) return
         val images = _pendingImages.value
-        if (text.isBlank() && images.isEmpty()) return
+        val docs = _pendingDocuments.value
+        if (text.isBlank() && images.isEmpty() && docs.isEmpty()) return
         if (settingsStore.activeProvider() == null) { _error.value = "请先在设置中添加 Provider"; return }
-        if (_settings.value.activeModel == null &&
+        if (settings.activeModel == null &&
             settingsStore.activeProvider()?.models.isNullOrEmpty()
         ) { _error.value = "未选择模型"; return }
 
+        // 文档附件转为提示词前缀（对齐 Android DocumentAsPromptTransformer 的思路）
+        val fullText = buildString {
+            docs.forEach { (name, content) ->
+                append("【文件：$name】\n```\n").append(content).append("\n```\n\n")
+            }
+            append(text)
+        }.trim()
+
         var conv = _current.value
-            ?: conversationStore.create(assistantId = _settings.value.activeAssistantId)
+            ?: conversationStore.create(assistantId = settings.activeAssistantId)
         conv.messageNodes.add(
             MessageNode(
                 messages = mutableListOf(
-                    ChatMessage(role = "user", content = text, imageUrls = images)
+                    ChatMessage(role = "user", content = fullText, imageUrls = images)
                 )
             )
         )
-        if (conv.title == "新对话") conv.title = text.take(20).ifBlank { "图片对话" }
+        // 标题留给生成完成后的 AI 标题（失败时回退为首条消息截断）
+        conv.chatSuggestions = emptyList()
         _pendingImages.value = emptyList()
+        _pendingDocuments.value = emptyList()
         conv = conversationStore.save(conv)
         _current.value = conv
         _conversations.value = conversationStore.list()
@@ -137,7 +222,7 @@ class ChatViewModel(
     private fun startGeneration(conv: Conversation) {
         val provider = settingsStore.activeProvider()
         if (provider == null) { _error.value = "请先在设置中添加 Provider"; return }
-        val s = _settings.value
+        val s = settings
         // 会话绑定的助手优先，其次当前选中的助手
         val assistant = conv.assistantId?.let { id -> s.assistants.firstOrNull { it.id == id } }
             ?: s.activeAssistant()
@@ -146,6 +231,9 @@ class ChatViewModel(
         val systemPrompt = assistant?.systemPrompt?.ifBlank { s.systemPrompt } ?: s.systemPrompt
         val temperature = assistant?.temperature ?: s.temperature
         val reasoningEffort = assistant?.reasoningEffort
+        val topP = assistant?.topP
+        val maxTokens = assistant?.maxTokens
+        val contextSize = assistant?.contextMessageSize ?: 40
 
         // 追加空的 assistant 变体：最后一个节点不是 assistant 时新建节点，否则新建分支
         val lastNode = conv.messageNodes.lastOrNull()
@@ -168,6 +256,14 @@ class ChatViewModel(
         _streamingText.value = ""
         _streamingReasoning.value = ""
         streamJob = scope.launch {
+            // 联网搜索：用最后一条用户消息做查询，结果注入 system 上下文
+            var searchContext: String? = null
+            if (settings.searchEnabled && settings.searchApiKey.isNotBlank()) {
+                val query = context.lastOrNull { it.role == "user" }?.content?.take(300)
+                if (!query.isNullOrBlank()) {
+                    searchContext = searchClient.search(settings.searchService, settings.searchApiKey, query, settings.searchResultSize)
+                }
+            }
             val sb = StringBuilder()
             val rsb = StringBuilder()
             var promptTokens: Int? = null
@@ -175,7 +271,10 @@ class ChatViewModel(
             val startAt = System.currentTimeMillis()
             var firstReasoningAt = 0L
             var firstContentAt = 0L
-            llm.streamChat(provider, model, context, systemPrompt, temperature, reasoningEffort)
+            llm.streamChat(
+                provider, model, context, systemPrompt, temperature, reasoningEffort,
+                topP, maxTokens, contextSize, searchContext,
+            )
                 .catch { e -> _error.value = e.message }
                 .onCompletion {
                     // 停止/出错时保留已生成的部分内容
@@ -194,6 +293,10 @@ class ChatViewModel(
                     _current.value = conversationStore.get(conv.id)
                     _conversations.value = conversationStore.list()
                     _streaming.value = false
+                    if (sb.isNotBlank()) {
+                        generateTitle(conv.id, provider, settings.titleModelId ?: model, context)
+                        generateSuggestions(conv.id, provider, settings.suggestionModelId ?: model, context, sb.toString())
+                    }
                 }
                 .collect { delta ->
                     when (delta) {
@@ -213,6 +316,62 @@ class ChatViewModel(
                         }
                     }
                 }
+        }
+    }
+
+    /** AI 生成会话标题（对齐安卓 generateTitle），失败回退为首条消息截断 */
+    private fun generateTitle(
+        conversationId: String,
+        provider: me.rerere.rikkahub.desktop.data.ProviderConfig,
+        model: String,
+        context: List<ChatMessage>,
+    ) {
+        scope.launch {
+            val conv = conversationStore.get(conversationId) ?: return@launch
+            if (conv.title != "新对话") return@launch
+            val firstUser = context.firstOrNull { it.role == "user" }?.content?.take(300) ?: return@launch
+            val title = llm.complete(provider, model, settings.titlePrompt + "\n\n" + firstUser)
+                ?.lines()?.firstOrNull()?.trim()?.take(30)
+                ?: firstUser.lines().first().take(20)
+            if (title.isBlank()) return@launch
+            val latest = conversationStore.get(conversationId) ?: return@launch
+            if (latest.title != "新对话") return@launch
+            latest.title = title
+            conversationStore.save(latest)
+            _conversations.value = conversationStore.list()
+            if (_current.value?.id == conversationId) {
+                _current.value = latest
+            }
+        }
+    }
+
+    /** 生成对话建议（对齐 Android generateSuggestion）：一次非流式短调用 */
+    private fun generateSuggestions(
+        conversationId: String,
+        provider: me.rerere.rikkahub.desktop.data.ProviderConfig,
+        model: String,
+        context: List<ChatMessage>,
+        reply: String,
+    ) {
+        scope.launch {
+            val lastUser = context.lastOrNull { it.role == "user" }?.content?.take(500) ?: return@launch
+            val prompt = buildString {
+                append(settings.suggestionPrompt).append("\n\n")
+                append("用户：").append(lastUser).append('\n')
+                append("助手：").append(reply.take(800))
+            }
+            val raw = llm.complete(provider, model, prompt) ?: return@launch
+            val suggestions = raw.lines()
+                .map { it.trim().replace(Regex("""^[-*•\d.、)\s]+"""), "") }
+                .filter { it.isNotBlank() }
+                .take(4)
+            if (suggestions.isEmpty()) return@launch
+            val latest = conversationStore.get(conversationId) ?: return@launch
+            latest.chatSuggestions = suggestions
+            conversationStore.save(latest)
+            if (_current.value?.id == conversationId) {
+                _current.value = latest
+            }
         }
     }
 
@@ -284,7 +443,7 @@ class ChatViewModel(
     val modelsLoading: StateFlow<Boolean> = _modelsLoading
 
     fun fetchModels(providerId: String, onResult: (List<String>) -> Unit) {
-        val provider = _settings.value.providers.firstOrNull { it.id == providerId } ?: return
+        val provider = settings.providers.firstOrNull { it.id == providerId } ?: return
         _modelsLoading.value = true
         scope.launch {
             val models = llm.listModels(provider)
