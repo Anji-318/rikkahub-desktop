@@ -21,9 +21,13 @@ jobs:
           - os: windows-latest
             package-task: packageMsi
             artifact-name: windows-x64
+          # macos-latest = Apple Silicon (arm64)；macos-13 = Intel (x64)
           - os: macos-latest
             package-task: packageDmg
-            artifact-name: macos
+            artifact-name: macos-arm64
+          - os: macos-13
+            package-task: packageDmg
+            artifact-name: macos-intel
           - os: ubuntu-latest
             package-task: packageDeb
             artifact-name: linux-x64
@@ -38,10 +42,31 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      # 统一用 bash（Windows runner 默认 pwsh 无法直接执行无扩展名的 gradlew 脚本）
       - name: 构建桌面版（绿色目录 + 安装包）
-        run: ./gradlew createDistributable ${{ matrix.package-task }} --no-daemon
+        shell: bash
+        run: |
+          chmod +x gradlew
+          ./gradlew createDistributable ${{ matrix.package-task }} --no-daemon || {
+            echo "::error::构建失败，以下是 jpackage 日志："
+            for f in build/compose/logs/*/*.txt; do
+              [ -f "$f" ] || continue
+              echo "----- $f -----"
+              cat "$f"
+            done
+            exit 1
+          }
         env:
           GRADLE_OPTS: "-Xmx4g"
+
+      # 失败时把 jpackage 日志传为 artifact，便于事后排查
+      - name: 上传 jpackage 日志（仅失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jpackage-logs-${{ matrix.artifact-name }}
+          path: build/compose/logs/
+          if-no-files-found: ignore
 
       - name: 收集产物（Windows）
         if: runner.os == 'Windows'
@@ -56,8 +81,12 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           mkdir dist
-          ditto -c -k --sequesterRsrc --keepParent build/compose/binaries/main/app/RikkaHub.app dist/RikkaHub-desktop-macos.zip
-          cp build/compose/binaries/main/dmg/*.dmg dist/
+          ditto -c -k --sequesterRsrc --keepParent build/compose/binaries/main/app/RikkaHub.app "dist/RikkaHub-desktop-${{ matrix.artifact-name }}.zip"
+          # dmg 文件名带上架构后缀，避免两个 mac job 产物同名冲突
+          for f in build/compose/binaries/main/dmg/*.dmg; do
+            base=$(basename "$f" .dmg)
+            cp "$f" "dist/${base}-${{ matrix.artifact-name }}.dmg"
+          done
           ls -la dist
 
       - name: 收集产物（Linux）
@@ -104,9 +133,13 @@ jobs:
             - `RikkaHub-*.msi`：安装包
             - `RikkaHub-desktop-windows-x64.zip`：绿色版，解压后运行 RikkaHub.exe
 
-            **macOS**
-            - `RikkaHub-*.dmg`：安装镜像（未签名，首次打开需在「系统设置 → 隐私与安全性」中允许）
-            - `RikkaHub-desktop-macos.zip`：绿色版 .app
+            **macOS（Apple Silicon / M 系列）**
+            - `RikkaHub-*-macos-arm64.dmg`：安装镜像（未签名，首次打开需在「系统设置 → 隐私与安全性」中允许）
+            - `RikkaHub-desktop-macos-arm64.zip`：绿色版 .app
+
+            **macOS（Intel）**
+            - `RikkaHub-*-macos-intel.dmg`：安装镜像（未签名，同上需允许）
+            - `RikkaHub-desktop-macos-intel.zip`：绿色版 .app
 
             **Linux x64**
             - `RikkaHub-*.deb`：Debian/Ubuntu 安装包
