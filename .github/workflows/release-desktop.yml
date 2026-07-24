@@ -1,4 +1,4 @@
-name: Release RikkaHub Desktop（Windows）
+name: Release RikkaHub Desktop（全平台）
 
 on:
   workflow_dispatch:   # 仅手动触发
@@ -6,14 +6,28 @@ on:
       tag:
         description: '发布标签（同名自动覆盖旧 Release）'
         required: true
-        default: 'v0.3.0-desktop'
+        default: 'v0.6.0-desktop'
 
 permissions:
   contents: write      # 允许创建/删除 Release
 
 jobs:
   build:
-    runs-on: windows-latest   # jpackage 打 Windows 包必须在 Windows runner 上
+    # jpackage 打原生包必须在对应平台的 runner 上
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            package-task: packageMsi
+            artifact-name: windows-x64
+          - os: macos-latest
+            package-task: packageDmg
+            artifact-name: macos
+          - os: ubuntu-latest
+            package-task: packageDeb
+            artifact-name: linux-x64
+    runs-on: ${{ matrix.os }}
     steps:
       - name: 检出源码
         uses: actions/checkout@v4
@@ -24,43 +38,79 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: 构建桌面版（绿色目录 + MSI 安装包）
-        run: |
-          ./gradlew createDistributable packageMsi --no-daemon
+      - name: 构建桌面版（绿色目录 + 安装包）
+        run: ./gradlew createDistributable ${{ matrix.package-task }} --no-daemon
         env:
           GRADLE_OPTS: "-Xmx4g"
 
-      - name: 打包绿色版 zip
+      - name: 收集产物（Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           mkdir dist
           Compress-Archive -Path build/compose/binaries/main/app/RikkaHub -DestinationPath dist/RikkaHub-desktop-windows-x64.zip
           Copy-Item build/compose/binaries/main/msi/*.msi dist/
           ls dist
-        shell: pwsh
+
+      - name: 收集产物（macOS）
+        if: runner.os == 'macOS'
+        run: |
+          mkdir dist
+          ditto -c -k --sequesterRsrc --keepParent build/compose/binaries/main/app/RikkaHub.app dist/RikkaHub-desktop-macos.zip
+          cp build/compose/binaries/main/dmg/*.dmg dist/
+          ls -la dist
+
+      - name: 收集产物（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          mkdir dist
+          tar -czf dist/RikkaHub-desktop-linux-x64.tar.gz -C build/compose/binaries/main/app RikkaHub
+          cp build/compose/binaries/main/deb/*.deb dist/
+          ls -la dist
 
       - name: 上传到 Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: RikkaHub-desktop-windows
+          name: RikkaHub-desktop-${{ matrix.artifact-name }}
           path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载全部平台产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: RikkaHub-desktop-*
+          path: dist
+          merge-multiple: true
 
       - name: 删除已存在的同名 Release 和 tag（覆盖发布）
         run: |
-          gh release delete "${{ inputs.tag }}" --yes --cleanup-tag 2>$null; $true
-          git push origin ":refs/tags/${{ inputs.tag }}" 2>$null; $true
-        shell: pwsh
+          gh release delete "${{ inputs.tag }}" --yes --cleanup-tag 2>/dev/null || true
+          git push origin ":refs/tags/${{ inputs.tag }}" 2>/dev/null || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 创建 GitHub Release 并附带安装包
+      - name: 创建 GitHub Release 并附带全部平台安装包
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag }}
           name: RikkaHub Desktop ${{ inputs.tag }}
           body: |
-            RikkaHub 桌面原生客户端（Compose Desktop，Windows x64）。
+            RikkaHub 桌面原生客户端（Compose Desktop，Kotlin + Compose Multiplatform）。
+
+            **Windows x64**
             - `RikkaHub-*.msi`：安装包
             - `RikkaHub-desktop-windows-x64.zip`：绿色版，解压后运行 RikkaHub.exe
+
+            **macOS**
+            - `RikkaHub-*.dmg`：安装镜像（未签名，首次打开需在「系统设置 → 隐私与安全性」中允许）
+            - `RikkaHub-desktop-macos.zip`：绿色版 .app
+
+            **Linux x64**
+            - `RikkaHub-*.deb`：Debian/Ubuntu 安装包
+            - `RikkaHub-desktop-linux-x64.tar.gz`：绿色版，解压后运行 bin/RikkaHub
           files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
