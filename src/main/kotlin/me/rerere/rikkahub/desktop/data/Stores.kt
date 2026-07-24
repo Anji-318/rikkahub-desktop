@@ -73,6 +73,12 @@ class SettingsStore {
         }
     }
 
+    /** 重新从磁盘加载设置（恢复备份后调用），normalize 逻辑照常生效 */
+    @Synchronized
+    fun reload() {
+        settings = load()
+    }
+
     @Synchronized
     fun update(block: AppSettings.() -> Unit): AppSettings {
         settings.apply(block)

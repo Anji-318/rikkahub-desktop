@@ -25,10 +25,17 @@ import androidx.compose.ui.text.style.TextOverflow
 import me.rerere.rikkahub.desktop.data.Assistant
 import me.rerere.rikkahub.desktop.data.AssistantRegex
 import me.rerere.rikkahub.desktop.data.KVEntry
+import me.rerere.rikkahub.desktop.data.PresetMessage
 import me.rerere.rikkahub.desktop.data.ProviderConfig
 import me.rerere.rikkahub.desktop.data.QuickMessage
+import me.rerere.rikkahub.desktop.data.StoragePaths
 import me.rerere.rikkahub.desktop.ui.chat.ChatViewModel
+import me.rerere.rikkahub.desktop.ui.theme.CUSTOM_THEME_ID
 import me.rerere.rikkahub.desktop.ui.theme.PresetThemes
+import me.rerere.rikkahub.desktop.ui.theme.customPrimaryColor
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -39,6 +46,9 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
     var editingAssistant by remember { mutableStateOf<Assistant?>(null) }
     var showAssistantEditor by remember { mutableStateOf(false) }
     var showQmEditor by remember { mutableStateOf(false) }
+    // 备份与恢复：结果提示 + 待确认的导入路径
+    var backupMsg by remember { mutableStateOf<String?>(null) }
+    var pendingImportPath by remember { mutableStateOf<String?>(null) }
 
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).verticalScroll(rememberScrollState()).padding(20.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -166,6 +176,55 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                     }
                 )
             }
+            // 自定义主题（HSL 编辑器）
+            FilterChip(
+                selected = settings.themeId == CUSTOM_THEME_ID,
+                onClick = { vm.updateSettings { themeId = CUSTOM_THEME_ID }; vm.refreshSettings() },
+                label = { Text("自定义", fontSize = 12.sp) },
+                leadingIcon = {
+                    Box(Modifier.size(12.dp).background(
+                        customPrimaryColor(settings.customPrimaryH, settings.customPrimaryS, settings.customPrimaryL, dark = false),
+                        CircleShape
+                    ))
+                }
+            )
+        }
+        // 选中「自定义」时展开 HSL 编辑器（拖动用局部状态，松手才持久化）
+        if (settings.themeId == CUSTOM_THEME_ID) {
+            Spacer(Modifier.height(8.dp))
+            Text("主色", fontSize = 13.sp)
+            HslSliders(
+                h = settings.customPrimaryH, s = settings.customPrimaryS, l = settings.customPrimaryL,
+                onFinished = { h, s, l ->
+                    vm.updateSettings { customPrimaryH = h; customPrimaryS = s; customPrimaryL = l }
+                }
+            )
+            Spacer(Modifier.height(4.dp))
+            Text("背景色", fontSize = 13.sp)
+            HslSliders(
+                h = settings.customBackgroundH, s = settings.customBackgroundS, l = settings.customBackgroundL,
+                onFinished = { h, s, l ->
+                    vm.updateSettings { customBackgroundH = h; customBackgroundS = s; customBackgroundL = l }
+                }
+            )
+            // 实时预览：主色在浅色/深色下的效果
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
+                Text("预览", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.width(8.dp))
+                Box(Modifier.size(28.dp).background(
+                    customPrimaryColor(settings.customPrimaryH, settings.customPrimaryS, settings.customPrimaryL, dark = false),
+                    RoundedCornerShape(6.dp)
+                ))
+                Spacer(Modifier.width(4.dp))
+                Text("浅色", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.width(10.dp))
+                Box(Modifier.size(28.dp).background(
+                    customPrimaryColor(settings.customPrimaryH, settings.customPrimaryS, settings.customPrimaryL, dark = true),
+                    RoundedCornerShape(6.dp)
+                ))
+                Spacer(Modifier.width(4.dp))
+                Text("深色", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
 
         // 快捷消息
@@ -206,6 +265,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
             Triple("标题生成", settings.titleModelId, "title"),
             Triple("对话建议", settings.suggestionModelId, "suggestion"),
             Triple("翻译", settings.translateModelId, "translate"),
+            Triple("上下文压缩", settings.compressModelId, "compress"),
         ).forEach { (label, current, key) ->
             var menu by remember { mutableStateOf(false) }
             Row(
@@ -234,7 +294,8 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                                     when (key) {
                                         "title" -> titleModelId = null
                                         "suggestion" -> suggestionModelId = null
-                                        else -> translateModelId = null
+                                        "translate" -> translateModelId = null
+                                        "compress" -> compressModelId = null
                                     }
                                 }
                                 menu = false
@@ -253,7 +314,8 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                                         when (key) {
                                             "title" -> titleModelId = m
                                             "suggestion" -> suggestionModelId = m
-                                            else -> translateModelId = m
+                                            "translate" -> translateModelId = m
+                                            "compress" -> compressModelId = m
                                         }
                                     }
                                     menu = false
@@ -264,6 +326,21 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                 }
             }
         }
+
+        // 压缩提示词
+        var compressPromptInput by remember(settings.compressPrompt) { mutableStateOf(settings.compressPrompt) }
+        OutlinedTextField(
+            value = compressPromptInput,
+            onValueChange = { compressPromptInput = it },
+            label = { Text("压缩提示词") },
+            minLines = 2,
+            modifier = Modifier.fillMaxWidth(),
+            trailingIcon = {
+                if (compressPromptInput != settings.compressPrompt) {
+                    TextButton(onClick = { vm.updateSettings { compressPrompt = compressPromptInput } }) { Text("保存", fontSize = 12.sp) }
+                }
+            }
+        )
 
         // 联网搜索
         HorizontalDivider(Modifier.padding(vertical = 12.dp))
@@ -312,6 +389,51 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
                 if (settings.searchService == "tavily") "API Key 申请：https://app.tavily.com/home" else "API Key 申请：https://dashboard.exa.ai",
                 fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        // 语音朗读 (TTS)
+        HorizontalDivider(Modifier.padding(vertical = 12.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("语音朗读 (TTS)", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.weight(1f))
+            Switch(
+                checked = settings.ttsEnabled,
+                onCheckedChange = { v -> vm.updateSettings { ttsEnabled = v } }
+            )
+        }
+        if (settings.ttsEnabled) {
+            var ttsModelInput by remember(settings.ttsModel) { mutableStateOf(settings.ttsModel) }
+            OutlinedTextField(
+                value = ttsModelInput,
+                onValueChange = { ttsModelInput = it },
+                label = { Text("TTS 模型") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                trailingIcon = {
+                    if (ttsModelInput != settings.ttsModel) {
+                        TextButton(onClick = { vm.updateSettings { ttsModel = ttsModelInput } }) { Text("保存", fontSize = 12.sp) }
+                    }
+                }
+            )
+            var ttsVoiceInput by remember(settings.ttsVoice) { mutableStateOf(settings.ttsVoice) }
+            OutlinedTextField(
+                value = ttsVoiceInput,
+                onValueChange = { ttsVoiceInput = it },
+                label = { Text("发音人") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                trailingIcon = {
+                    if (ttsVoiceInput != settings.ttsVoice) {
+                        TextButton(onClick = { vm.updateSettings { ttsVoice = ttsVoiceInput } }) { Text("保存", fontSize = 12.sp) }
+                    }
+                }
+            )
+            Text(
+                "使用当前 Provider 的 OpenAI 兼容接口（POST /audio/speech）",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp)
             )
         }
 
@@ -415,12 +537,72 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
             }
         }
 
+        // 备份与恢复
+        HorizontalDivider(Modifier.padding(vertical = 12.dp))
+        Text("备份与恢复", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                shape = RoundedCornerShape(10.dp),
+                onClick = {
+                    // AWT 文件选择器（SAVE 模式，默认带时间戳的文件名）
+                    val dialog = java.awt.FileDialog(null as java.awt.Frame?, "导出备份", java.awt.FileDialog.SAVE)
+                    dialog.file = "rikkahub-backup-${SimpleDateFormat("yyyyMMdd-HHmm").format(Date())}.zip"
+                    dialog.isVisible = true
+                    val dir = dialog.directory
+                    val name = dialog.file
+                    if (dir != null && name != null) {
+                        val path = File(dir, if (name.endsWith(".zip")) name else "$name.zip").absolutePath
+                        vm.exportBackupTo(path) { ok, msg -> backupMsg = msg }
+                    }
+                }
+            ) { Text("导出备份", fontSize = 12.sp) }
+            OutlinedButton(
+                shape = RoundedCornerShape(10.dp),
+                onClick = {
+                    val dialog = java.awt.FileDialog(null as java.awt.Frame?, "恢复备份", java.awt.FileDialog.LOAD)
+                    dialog.file = "*.zip"
+                    dialog.isVisible = true
+                    val dir = dialog.directory
+                    val name = dialog.file
+                    if (dir != null && name != null) {
+                        pendingImportPath = File(dir, name).absolutePath
+                    }
+                }
+            ) { Text("恢复备份", fontSize = 12.sp) }
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "备份目录：${StoragePaths.root.absolutePath}",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        backupMsg?.let {
+            Text(it, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+
         // 版本号（用于确认当前运行的构建版本）
         Spacer(Modifier.height(24.dp))
         Text(
             "RikkaHub Desktop v0.5.0",
             fontSize = 11.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+        )
+    }
+
+    // 恢复备份确认弹窗（会覆盖当前设置与全部会话）
+    pendingImportPath?.let { path ->
+        AlertDialog(
+            onDismissRequest = { pendingImportPath = null },
+            title = { Text("恢复备份") },
+            text = { Text("将覆盖当前设置与全部会话，此操作不可撤销。建议先导出备份。\n\n确定从该文件恢复吗？\n$path") },
+            confirmButton = {
+                Button(onClick = {
+                    pendingImportPath = null
+                    vm.importBackupFrom(path) { ok, msg -> backupMsg = msg }
+                }) { Text("恢复") }
+            },
+            dismissButton = { TextButton(onClick = { pendingImportPath = null }) { Text("取消") } }
         )
     }
 
@@ -471,6 +653,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
         AssistantEditorDialog(
             initial = editingAssistant,
             models = settings.providers.firstOrNull { it.id == settings.activeProviderId }?.models ?: emptyList(),
+            vm = vm,
             onDismiss = { showAssistantEditor = false },
             onSave = { a ->
                 vm.updateSettings {
@@ -490,6 +673,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
 private fun AssistantEditorDialog(
     initial: Assistant?,
     models: List<String>,
+    vm: ChatViewModel,
     onDismiss: () -> Unit,
     onSave: (Assistant) -> Unit
 ) {
@@ -509,6 +693,11 @@ private fun AssistantEditorDialog(
     var bodiesText by remember {
         mutableStateOf(initial?.customBodies?.joinToString("\n") { "${it.key}: ${it.value}" } ?: "")
     }
+    var messageTemplate by remember { mutableStateOf(initial?.messageTemplate ?: "") }
+    var presetMessages by remember { mutableStateOf(initial?.presetMessages ?: emptyList()) }
+    var enableMemory by remember { mutableStateOf(initial?.enableMemory ?: false) }
+    var useGlobalMemory by remember { mutableStateOf(initial?.useGlobalMemory ?: false) }
+    var showMemoryManager by remember { mutableStateOf(false) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -525,6 +714,76 @@ private fun AssistantEditorDialog(
                     label = { Text("系统提示词（可选）") },
                     maxLines = 6,
                 )
+                // 消息模板（空=不启用）
+                OutlinedTextField(
+                    value = messageTemplate,
+                    onValueChange = { messageTemplate = it },
+                    label = { Text("消息模板（可选）") },
+                    maxLines = 3,
+                )
+                Text(
+                    "可用变量：{{ message }}、{{ role }}、{{ time }}、{{ date }}；留空不启用，只作用于发送内容",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                // 预置消息（开场白）：role 下拉 + 内容多行 + 删除/添加
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("预置消息（开场白）", fontSize = 13.sp, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { presetMessages = presetMessages + PresetMessage() }) {
+                        Icon(Icons.Default.Add, null, Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("添加", fontSize = 12.sp)
+                    }
+                }
+                presetMessages.forEachIndexed { idx, pm ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        var roleMenu by remember { mutableStateOf(false) }
+                        Box {
+                            Row(
+                                Modifier.clickable { roleMenu = true }.padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    if (pm.role == "assistant") "助手" else "用户",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Icon(Icons.Default.ArrowDropDown, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            DropdownMenu(expanded = roleMenu, onDismissRequest = { roleMenu = false }) {
+                                listOf("user" to "用户", "assistant" to "助手").forEach { (role, label) ->
+                                    DropdownMenuItem(
+                                        text = { Text(label, fontSize = 12.sp) },
+                                        onClick = {
+                                            presetMessages = presetMessages.mapIndexed { i, p ->
+                                                if (i == idx) p.copy(role = role) else p
+                                            }
+                                            roleMenu = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(Modifier.weight(1f))
+                        IconButton(
+                            onClick = { presetMessages = presetMessages.filterIndexed { i, _ -> i != idx } },
+                            modifier = Modifier.size(28.dp)
+                        ) {
+                            Icon(Icons.Default.Delete, "删除", Modifier.size(16.dp))
+                        }
+                    }
+                    OutlinedTextField(
+                        value = pm.content,
+                        onValueChange = { v ->
+                            presetMessages = presetMessages.mapIndexed { i, p ->
+                                if (i == idx) p.copy(content = v) else p
+                            }
+                        },
+                        label = { Text("内容") },
+                        maxLines = 4,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
                 if (models.isNotEmpty()) {
                     Text("绑定模型", fontSize = 13.sp)
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -593,6 +852,28 @@ private fun AssistantEditorDialog(
                     label = { Text("正则变换（每行 input|查找|替换 或 output|查找|替换）") },
                     maxLines = 4,
                 )
+                // 记忆：开启后注入记忆段并注册 memory 工具，模型在对话中自主读写
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("记忆（长期记忆）", fontSize = 13.sp, modifier = Modifier.weight(1f))
+                    Switch(checked = enableMemory, onCheckedChange = { enableMemory = it })
+                }
+                if (enableMemory) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("使用全局记忆（全助手共享）", fontSize = 12.sp, modifier = Modifier.weight(1f))
+                        Switch(checked = useGlobalMemory, onCheckedChange = { useGlobalMemory = it })
+                    }
+                    if (initial != null) {
+                        OutlinedButton(onClick = { showMemoryManager = true }) {
+                            Text("管理记忆", fontSize = 12.sp)
+                        }
+                    } else {
+                        Text(
+                            "保存助手后可管理记忆",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
         },
         confirmButton = {
@@ -613,6 +894,10 @@ private fun AssistantEditorDialog(
                             customHeaders = parseKvLines(headersText),
                             customBodies = parseKvLines(bodiesText),
                             regexes = parseRegexLines(regexText),
+                            presetMessages = presetMessages.filter { it.content.isNotBlank() },
+                            messageTemplate = messageTemplate,
+                            enableMemory = enableMemory,
+                            useGlobalMemory = useGlobalMemory,
                         )
                     )
                 }
@@ -620,6 +905,142 @@ private fun AssistantEditorDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
+
+    // 管理记忆对话框：列表（编辑/删除）+ 顶部添加框
+    if (showMemoryManager && initial != null) {
+        MemoryManagerDialog(
+            vm = vm,
+            assistantId = initial.id,
+            onDismiss = { showMemoryManager = false },
+        )
+    }
+}
+
+/** 记忆管理对话框：记忆列表（内容可编辑 + 删除）+ 顶部添加框，CRUD 走 VM 桥接（按助手归属） */
+@Composable
+private fun MemoryManagerDialog(
+    vm: ChatViewModel,
+    assistantId: String,
+    onDismiss: () -> Unit,
+) {
+    var memories by remember { mutableStateOf(vm.listMemories(assistantId)) }
+    var newContent by remember { mutableStateOf("") }
+    fun refresh() { memories = vm.listMemories(assistantId) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("管理记忆") },
+        text = {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState())
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = newContent,
+                        onValueChange = { newContent = it },
+                        label = { Text("添加记忆") },
+                        maxLines = 3,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(
+                        onClick = {
+                            if (newContent.isNotBlank()) {
+                                vm.createMemory(assistantId, newContent.trim())
+                                newContent = ""
+                                refresh()
+                            }
+                        }
+                    ) {
+                        Icon(Icons.Default.Add, "添加")
+                    }
+                }
+                if (memories.isEmpty()) {
+                    Text(
+                        "暂无记忆，开启记忆后模型会在对话中自动积累",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                memories.forEach { m ->
+                    var editContent by remember(m.id, m.updatedAt) { mutableStateOf(m.content) }
+                    Column {
+                        OutlinedTextField(
+                            value = editContent,
+                            onValueChange = { editContent = it },
+                            maxLines = 4,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(
+                                enabled = editContent.isNotBlank() && editContent != m.content,
+                                onClick = {
+                                    vm.updateMemory(assistantId, m.id, editContent.trim())
+                                    refresh()
+                                }
+                            ) { Text("保存", fontSize = 12.sp) }
+                            Spacer(Modifier.weight(1f))
+                            IconButton(
+                                onClick = {
+                                    vm.deleteMemory(assistantId, m.id)
+                                    refresh()
+                                },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(Icons.Default.Delete, "删除", Modifier.size(16.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } }
+    )
+}
+
+/** HSL 三滑杆编辑器：拖动用局部 remember 状态，松手（onValueChangeFinished）才回调持久化 */
+@Composable
+private fun HslSliders(
+    h: Float,
+    s: Float,
+    l: Float,
+    onFinished: (Float, Float, Float) -> Unit,
+) {
+    var hue by remember(h) { mutableStateOf(h) }
+    var sat by remember(s) { mutableStateOf(s) }
+    var lig by remember(l) { mutableStateOf(l) }
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("色相: ${"%.0f".format(hue)}", fontSize = 12.sp, modifier = Modifier.width(90.dp))
+            Slider(
+                value = hue,
+                onValueChange = { hue = it },
+                onValueChangeFinished = { onFinished(hue, sat, lig) },
+                valueRange = 0f..360f,
+                modifier = Modifier.weight(1f)
+            )
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("饱和: ${"%.2f".format(sat)}", fontSize = 12.sp, modifier = Modifier.width(90.dp))
+            Slider(
+                value = sat,
+                onValueChange = { sat = it },
+                onValueChangeFinished = { onFinished(hue, sat, lig) },
+                valueRange = 0f..1f,
+                modifier = Modifier.weight(1f)
+            )
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("亮度: ${"%.2f".format(lig)}", fontSize = 12.sp, modifier = Modifier.width(90.dp))
+            Slider(
+                value = lig,
+                onValueChange = { lig = it },
+                onValueChangeFinished = { onFinished(hue, sat, lig) },
+                valueRange = 0f..1f,
+                modifier = Modifier.weight(1f)
+            )
+        }
+    }
 }
 
 /** 解析 "Key: Value" 行式文本 */

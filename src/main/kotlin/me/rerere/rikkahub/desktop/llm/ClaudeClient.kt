@@ -68,7 +68,44 @@ class ClaudeClient : LlmClient {
             }
             put("messages", buildJsonArray {
                 params.history.takeLast(params.contextSize).forEach { msg -> add(buildMessage(msg)) }
+                // 工具循环续传：assistant 消息（tool_use 块）+ user 消息（tool_result 块）
+                params.toolExchanges.forEach { ex ->
+                    add(buildJsonObject {
+                        put("role", "assistant")
+                        put("content", buildJsonArray {
+                            add(buildJsonObject {
+                                put("type", "tool_use")
+                                put("id", ex.callId)
+                                put("name", ex.name)
+                                put("input", runCatching { json.parseToJsonElement(ex.argumentsJson) }
+                                    .getOrElse { buildJsonObject {} })
+                            })
+                        })
+                    })
+                    add(buildJsonObject {
+                        put("role", "user")
+                        put("content", buildJsonArray {
+                            add(buildJsonObject {
+                                put("type", "tool_result")
+                                put("tool_use_id", ex.callId)
+                                put("content", ex.result)
+                            })
+                        })
+                    })
+                }
             })
+            // 可用工具：Claude 格式 {name, description, input_schema}
+            if (params.tools.isNotEmpty()) {
+                put("tools", buildJsonArray {
+                    params.tools.forEach { t ->
+                        add(buildJsonObject {
+                            put("name", t.name)
+                            put("description", t.description)
+                            put("input_schema", json.parseToJsonElement(t.parametersSchema))
+                        })
+                    }
+                })
+            }
             put("stream", true)
             params.customBodies.forEach { kv ->
                 put(kv.key, runCatching { json.parseToJsonElement(kv.value) }.getOrElse { JsonPrimitive(kv.value) })
@@ -87,6 +124,10 @@ class ClaudeClient : LlmClient {
                 error("LLM 请求失败 HTTP ${resp.status.value} $detail")
             }
             var inputTokens: Int? = null
+            // 流式 tool_use 聚合：content_block_start 拿 id/name，input_json_delta 拼 partial_json，block_stop 发射
+            var toolUseId: String? = null
+            var toolUseName: String? = null
+            val toolUseArgs = StringBuilder()
             val channel = resp.bodyAsChannel()
             while (!channel.isClosedForRead) {
                 val line = channel.readUTF8Line() ?: continue
@@ -95,6 +136,15 @@ class ClaudeClient : LlmClient {
                 runCatching {
                     val obj = json.parseToJsonElement(data).jsonObject
                     when (obj["type"]?.jsonPrimitive?.contentOrNull) {
+                        "content_block_start" -> {
+                            val block = obj["content_block"]?.jsonObject
+                            if (block?.get("type")?.jsonPrimitive?.contentOrNull == "tool_use") {
+                                toolUseId = block["id"]?.jsonPrimitive?.contentOrNull
+                                toolUseName = block["name"]?.jsonPrimitive?.contentOrNull
+                                toolUseArgs.clear()
+                            }
+                        }
+
                         "content_block_delta" -> {
                             val delta = obj["delta"]?.jsonObject
                             when (delta?.get("type")?.jsonPrimitive?.contentOrNull) {
@@ -105,7 +155,21 @@ class ClaudeClient : LlmClient {
                                 "thinking_delta" -> delta["thinking"]?.jsonPrimitive?.contentOrNull
                                     ?.takeIf { it.isNotEmpty() }
                                     ?.let { emit(StreamDelta.Reasoning(it)) }
+
+                                "input_json_delta" -> delta["partial_json"]?.jsonPrimitive?.contentOrNull
+                                    ?.let { toolUseArgs.append(it) }
                             }
+                        }
+
+                        "content_block_stop" -> {
+                            val id = toolUseId
+                            val name = toolUseName
+                            if (id != null && name != null) {
+                                emit(StreamDelta.ToolCall(id, name, toolUseArgs.toString().ifBlank { "{}" }))
+                            }
+                            toolUseId = null
+                            toolUseName = null
+                            toolUseArgs.clear()
                         }
 
                         "message_start" -> {

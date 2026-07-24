@@ -55,7 +55,7 @@ fun main() {
         ) {
             window.minimumSize = java.awt.Dimension(960, 600)
 
-            RikkaTheme(darkTheme = settings.darkTheme, themeId = settings.themeId) {
+            RikkaTheme(darkTheme = settings.darkTheme, themeId = settings.themeId, settings = settings) {
                 if (showSettings) {
                     SettingsScreen(vm = vm, onBack = { showSettings = false })
                 } else {

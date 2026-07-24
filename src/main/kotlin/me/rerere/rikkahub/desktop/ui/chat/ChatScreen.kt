@@ -1,5 +1,8 @@
 package me.rerere.rikkahub.desktop.ui.chat
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -14,6 +17,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.CallSplit
+import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
@@ -32,11 +37,14 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Translate
+import androidx.compose.material.icons.automirrored.outlined.VolumeUp
+import androidx.compose.material.icons.outlined.Compress
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -82,13 +90,26 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
     val streaming by vm.streaming.collectAsState()
     val streamingText by vm.streamingText.collectAsState()
     val streamingReasoning by vm.streamingReasoning.collectAsState()
+    val toolRunning by vm.toolRunning.collectAsState()
     val error by vm.error.collectAsState()
     val settings = vm.settings
     val pendingImages by vm.pendingImages.collectAsState()
     val pendingDocuments by vm.pendingDocuments.collectAsState()
     val translation by vm.translation.collectAsState()
     val translationLoading by vm.translationLoading.collectAsState()
+    val compressing by vm.compressing.collectAsState()
+    val speakingMessageId by vm.speakingMessageId.collectAsState()
     var showFavorites by remember { mutableStateOf(false) }
+    var showCompressConfirm by remember { mutableStateOf(false) }
+    // 会话操作：重命名 / 移动到助手的目标会话
+    var renameTarget by remember { mutableStateOf<Conversation?>(null) }
+    var moveTarget by remember { mutableStateOf<Conversation?>(null) }
+    // 会话内搜索状态
+    var showSearchBar by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    var searchHitPos by remember { mutableIntStateOf(0) }
+    var highlightMessageId by remember { mutableStateOf<String?>(null) }
+    var highlightNonce by remember { mutableIntStateOf(0) } // 递增以重复触发同一条消息的高亮动画
 
     Row(Modifier.fillMaxSize()) {
         // ===== 左侧会话栏 =====
@@ -158,6 +179,8 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                             onClick = { vm.selectConversation(c.id) },
                             onDelete = { vm.deleteConversation(c.id) },
                             onTogglePin = { vm.togglePinConversation(c.id) },
+                            onRename = { renameTarget = c },
+                            onMoveToAssistant = { moveTarget = c },
                         )
                     }
                 } else {
@@ -178,6 +201,8 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                                 onClick = { vm.selectConversation(c.id) },
                                 onDelete = { vm.deleteConversation(c.id) },
                                 onTogglePin = { vm.togglePinConversation(c.id) },
+                                onRename = { renameTarget = c },
+                                onMoveToAssistant = { moveTarget = c },
                             )
                         }
                     }
@@ -272,6 +297,26 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                             overflow = TextOverflow.Ellipsis
                         )
                     }
+                    // 压缩上下文（用摘要替换历史，需确认）
+                    if (current != null) {
+                        IconButton(onClick = { showCompressConfirm = true }, enabled = !compressing && !streaming) {
+                            if (compressing) {
+                                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Outlined.Compress, "压缩上下文", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                    // 会话内搜索
+                    if (current != null) {
+                        IconButton(onClick = { showSearchBar = !showSearchBar }) {
+                            Icon(
+                                Icons.Default.Search,
+                                "会话内搜索",
+                                tint = if (showSearchBar) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                     // 导出当前对话为 Markdown
                     if (current != null) {
                         IconButton(onClick = {
@@ -286,16 +331,63 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
             }
             HorizontalDivider()
 
-            // 消息列表
+            // 消息列表滚动状态（搜索跳转与消息跳转器共用）
             val listState = rememberLazyListState()
             val scope = rememberCoroutineScope()
+
+            // 搜索命中消息的节点索引（LazyColumn 项索引与 messageNodes 顺序一致，分支取 currentMessage）
+            val hitNodeIndices = remember(current, searchQuery) {
+                val conv = current
+                if (searchQuery.isBlank() || conv == null) emptyList()
+                else conv.messageNodes.mapIndexedNotNull { idx, node ->
+                    val m = node.currentMessage
+                    if (m != null && (m.content.contains(searchQuery, true) ||
+                            m.reasoning.contains(searchQuery, true))
+                    ) idx else null
+                }
+            }
+
+            // 跳转到第 pos 个命中（循环），滚动到对应消息并短暂高亮
+            fun jumpToSearchHit(pos: Int) {
+                if (hitNodeIndices.isEmpty()) return
+                val p = Math.floorMod(pos, hitNodeIndices.size)
+                searchHitPos = p
+                val nodeIdx = hitNodeIndices[p]
+                highlightMessageId = current?.messageNodes?.getOrNull(nodeIdx)?.currentMessage?.id
+                highlightNonce++
+                scope.launch { listState.animateScrollToItem(nodeIdx) }
+            }
+
+            // 会话内搜索条（顶栏下方一行）
+            if (showSearchBar && current != null) {
+                ChatSearchBar(
+                    query = searchQuery,
+                    onQueryChange = { searchQuery = it; searchHitPos = 0 },
+                    hitCount = hitNodeIndices.size,
+                    currentHit = if (hitNodeIndices.isEmpty()) -1 else searchHitPos.coerceIn(0, hitNodeIndices.size - 1),
+                    onPrev = { jumpToSearchHit(searchHitPos - 1) },
+                    onNext = { jumpToSearchHit(searchHitPos + 1) },
+                    onClose = {
+                        showSearchBar = false
+                        searchQuery = ""
+                        highlightMessageId = null
+                    },
+                )
+                HorizontalDivider()
+            }
+
+            // 消息列表
             val msgCount = (current?.messageNodes?.size ?: 0) + if (streaming) 1 else 0
             LaunchedEffect(msgCount, streamingText.length) {
                 if (msgCount > 0) scope.launch { listState.animateScrollToItem(msgCount - 1) }
             }
+            // 是否可继续向上/向下滚动（用于跳转按钮显隐）
+            val canScrollBack by remember { derivedStateOf { listState.canScrollBackward } }
+            val canScrollForward by remember { derivedStateOf { listState.canScrollForward } }
+            Box(Modifier.weight(1f).fillMaxWidth()) {
             LazyColumn(
                 state = listState,
-                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 20.dp),
+                modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
                 contentPadding = PaddingValues(vertical = 16.dp)
             ) {
@@ -321,26 +413,57 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
                             onSelectBranch = { idx -> vm.selectBranch(node.id, idx) },
                             onTranslate = { vm.translateMessage(m.content) },
                             onToggleFavorite = { vm.toggleFavorite(m.id) },
+                            onFork = { vm.forkConversation(m.id) },
+                            onSpeak = if (settings.ttsEnabled) ({ vm.speakMessage(m.id, m.content) }) else null,
+                            speaking = speakingMessageId == m.id,
+                            highlighted = highlightMessageId == m.id,
+                            highlightNonce = highlightNonce,
                         )
                     }
                 }
                 if (streaming) {
                     item {
-                        MessageRow(
-                            message = ChatMessage(
-                                role = "assistant",
-                                content = streamingText,
-                                reasoning = streamingReasoning,
-                                model = modelName,
-                            ),
-                            node = null,
-                            streaming = true,
-                            isLast = true,
-                            ds = settings.displaySetting,
-                            onDelete = {}, onRegenerate = {}, onEditResend = {},
-                        )
+                        Column {
+                            MessageRow(
+                                message = ChatMessage(
+                                    role = "assistant",
+                                    content = streamingText,
+                                    reasoning = streamingReasoning,
+                                    model = modelName,
+                                ),
+                                node = null,
+                                streaming = true,
+                                isLast = true,
+                                ds = settings.displaySetting,
+                                onDelete = {}, onRegenerate = {}, onEditResend = {},
+                            )
+                            // 工具执行状态（如「正在写入记忆…」）
+                            toolRunning?.let {
+                                Text(
+                                    it,
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(start = 48.dp, top = 2.dp)
+                                )
+                            }
+                        }
                     }
                 }
+            }
+                // 消息跳转器（浮动在右下角，半透明竖排按钮组）
+                MessageJumper(
+                    showJumpTop = canScrollBack,
+                    showJumpBottom = canScrollForward,
+                    onJumpTop = { scope.launch { listState.animateScrollToItem(0) } },
+                    onPrevMessage = {
+                        scope.launch { listState.animateScrollToItem((listState.firstVisibleItemIndex - 1).coerceAtLeast(0)) }
+                    },
+                    onNextMessage = {
+                        scope.launch { listState.animateScrollToItem((listState.firstVisibleItemIndex + 1).coerceIn(0, (msgCount - 1).coerceAtLeast(0))) }
+                    },
+                    onJumpBottom = { scope.launch { listState.animateScrollToItem((msgCount - 1).coerceAtLeast(0)) } },
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 6.dp, bottom = 6.dp)
+                )
             }
 
             // 错误提示
@@ -576,6 +699,88 @@ fun ChatScreen(vm: ChatViewModel, onOpenSettings: () -> Unit) {
         }
     }
 
+    // ===== 压缩上下文确认弹窗 =====
+    if (showCompressConfirm) {
+        AlertDialog(
+            onDismissRequest = { showCompressConfirm = false },
+            title = { Text("压缩上下文") },
+            text = {
+                Text(
+                    "将调用模型把当前对话历史压缩为一段摘要，并用摘要替换全部历史消息。此操作不可撤销，确定继续吗？",
+                    fontSize = 14.sp,
+                    lineHeight = 22.sp
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showCompressConfirm = false
+                    vm.compressConversation()
+                }) { Text("压缩") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCompressConfirm = false }) { Text("取消") }
+            }
+        )
+    }
+
+    // ===== 重命名会话弹窗 =====
+    renameTarget?.let { target ->
+        var title by remember(target.id) { mutableStateOf(target.title) }
+        AlertDialog(
+            onDismissRequest = { renameTarget = null },
+            title = { Text("重命名会话") },
+            text = {
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    label = { Text("标题") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = title.isNotBlank(),
+                    onClick = {
+                        vm.renameConversation(target.id, title)
+                        renameTarget = null
+                    }
+                ) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameTarget = null }) { Text("取消") }
+            }
+        )
+    }
+
+    // ===== 移动到助手弹窗 =====
+    moveTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { moveTarget = null },
+            title = { Text("移动到助手") },
+            text = {
+                Column {
+                    settings.assistants.forEach { a ->
+                        Row(
+                            Modifier.fillMaxWidth().clickable {
+                                vm.moveConversationToAssistant(target.id, a.id)
+                                moveTarget = null
+                            }.padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = a.id == target.assistantId, onClick = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text(a.name, fontSize = 13.sp)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { moveTarget = null }) { Text("取消") }
+            }
+        )
+    }
+
     // ===== 翻译弹窗 =====
     translation?.let { result ->
         AlertDialog(
@@ -649,6 +854,8 @@ private fun ConversationItem(
     onClick: () -> Unit,
     onDelete: () -> Unit,
     onTogglePin: () -> Unit,
+    onRename: () -> Unit,
+    onMoveToAssistant: () -> Unit,
 ) {
     Surface(
         color = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surface,
@@ -661,6 +868,18 @@ private fun ConversationItem(
                 Spacer(Modifier.width(4.dp))
             }
             Text(c.title, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Icon(
+                Icons.Default.Edit, "重命名",
+                Modifier.size(14.dp).clickable { onRename() },
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            )
+            Spacer(Modifier.width(6.dp))
+            Icon(
+                Icons.AutoMirrored.Filled.DriveFileMove, "移动到助手",
+                Modifier.size(14.dp).clickable { onMoveToAssistant() },
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            )
+            Spacer(Modifier.width(6.dp))
             Icon(
                 Icons.Default.PushPin, if (c.pinned) "取消置顶" else "置顶",
                 Modifier.size(14.dp).clickable { onTogglePin() },
@@ -687,13 +906,31 @@ private fun MessageRow(
     ds: DisplaySetting = DisplaySetting(),
     onTranslate: () -> Unit = {},
     onToggleFavorite: () -> Unit = {},
+    onFork: () -> Unit = {},
+    onSpeak: (() -> Unit)? = null,
+    speaking: Boolean = false,
+    highlighted: Boolean = false,
+    highlightNonce: Int = 0,
 ) {
     val isUser = message.role == "user"
     val clipboard = LocalClipboardManager.current
     var editing by remember { mutableStateOf(false) }
     var editText by remember { mutableStateOf(message.content) }
+    var showSelectCopy by remember { mutableStateOf(false) }
     val bodyFontSize = 14.sp * ds.fontSizeRatio
     val bodyLineHeight = 22.sp * ds.fontSizeRatio
+
+    // 搜索跳转高亮：命中后消息气泡边框从主题色淡出（约 1.6 秒）
+    val highlightAlpha = remember { Animatable(0f) }
+    LaunchedEffect(highlightNonce) {
+        if (highlighted && highlightNonce > 0) {
+            highlightAlpha.snapTo(1f)
+            highlightAlpha.animateTo(0f, tween(1600))
+        }
+    }
+    val highlightBorder = if (highlightAlpha.value > 0f) {
+        BorderStroke(2.dp, MaterialTheme.colorScheme.primary.copy(alpha = highlightAlpha.value))
+    } else null
 
     if (isUser) {
         // ===== 用户消息（右对齐） =====
@@ -711,6 +948,7 @@ private fun MessageRow(
             Surface(
                 color = MaterialTheme.colorScheme.primaryContainer,
                 shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp, bottomStart = 14.dp, bottomEnd = 4.dp),
+                border = highlightBorder,
                 modifier = Modifier.widthIn(max = 680.dp)
             ) {
                 Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
@@ -745,11 +983,15 @@ private fun MessageRow(
             }
             MessageActions(
                 onCopy = { clipboard.setText(AnnotatedString(message.content)) },
+                onSelectCopy = if (!streaming && message.content.isNotBlank()) ({ showSelectCopy = true }) else null,
                 onEdit = if (!streaming && !editing) ({ editing = true; editText = message.content }) else null,
                 onRegenerate = null,
                 onDelete = if (!streaming) onDelete else null,
                 onFavorite = if (!streaming) onToggleFavorite else null,
                 favorite = message.favorite,
+                onFork = if (!streaming) onFork else null,
+                onSpeak = if (!streaming && message.content.isNotBlank()) onSpeak else null,
+                speaking = speaking,
             )
             BranchSwitcher(node, onSelectBranch)
         }
@@ -798,6 +1040,7 @@ private fun MessageRow(
                         color = MaterialTheme.colorScheme.surface,
                         shape = RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp, bottomStart = 4.dp, bottomEnd = 14.dp),
                         tonalElevation = 1.dp,
+                        border = highlightBorder,
                         modifier = Modifier.widthIn(max = 680.dp)
                     ) {
                         Box(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
@@ -836,32 +1079,70 @@ private fun MessageRow(
 
                 MessageActions(
                     onCopy = { clipboard.setText(AnnotatedString(message.content)) },
+                    onSelectCopy = if (!streaming && message.content.isNotBlank()) ({ showSelectCopy = true }) else null,
                     onEdit = null,
                     onRegenerate = if (isLast && !streaming) onRegenerate else null,
                     onDelete = if (!streaming) onDelete else null,
                     onTranslate = if (!streaming && message.content.isNotBlank()) onTranslate else null,
                     onFavorite = if (!streaming) onToggleFavorite else null,
                     favorite = message.favorite,
+                    onFork = if (!streaming) onFork else null,
+                    onSpeak = if (!streaming && message.content.isNotBlank()) onSpeak else null,
+                    speaking = speaking,
                 )
                 BranchSwitcher(node, onSelectBranch)
             }
         }
+    }
+
+    // 选择复制弹窗：SelectionContainer 展示全文，可自由圈选，也可一键复制全部
+    if (showSelectCopy) {
+        AlertDialog(
+            onDismissRequest = { showSelectCopy = false },
+            title = { Text("选择复制") },
+            text = {
+                SelectionContainer { Text(message.content, fontSize = 14.sp, lineHeight = 22.sp) }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    clipboard.setText(AnnotatedString(message.content))
+                    showSelectCopy = false
+                }) { Text("复制全部") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSelectCopy = false }) { Text("关闭") }
+            }
+        )
     }
 }
 
 @Composable
 private fun MessageActions(
     onCopy: () -> Unit,
+    onSelectCopy: (() -> Unit)? = null,
     onEdit: (() -> Unit)?,
     onRegenerate: (() -> Unit)?,
     onDelete: (() -> Unit)?,
     onTranslate: (() -> Unit)? = null,
     onFavorite: (() -> Unit)? = null,
     favorite: Boolean = false,
+    onFork: (() -> Unit)? = null,
+    onSpeak: (() -> Unit)? = null,
+    speaking: Boolean = false,
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(2.dp), modifier = Modifier.padding(top = 2.dp)) {
         IconButton(onClick = onCopy, modifier = Modifier.size(26.dp)) {
             Icon(Icons.Default.ContentCopy, "复制", Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (onSelectCopy != null) {
+            IconButton(onClick = onSelectCopy, modifier = Modifier.size(26.dp)) {
+                Icon(Icons.Default.SelectAll, "选择复制", Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        if (onFork != null) {
+            IconButton(onClick = onFork, modifier = Modifier.size(26.dp)) {
+                Icon(Icons.AutoMirrored.Filled.CallSplit, "分支", Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
         if (onTranslate != null) {
             IconButton(onClick = onTranslate, modifier = Modifier.size(26.dp)) {
@@ -875,6 +1156,16 @@ private fun MessageActions(
                     if (favorite) "取消收藏" else "收藏",
                     Modifier.size(14.dp),
                     tint = if (favorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        if (onSpeak != null) {
+            IconButton(onClick = onSpeak, modifier = Modifier.size(26.dp)) {
+                Icon(
+                    if (speaking) Icons.Default.Stop else Icons.AutoMirrored.Outlined.VolumeUp,
+                    if (speaking) "停止朗读" else "朗读",
+                    Modifier.size(14.dp),
+                    tint = if (speaking) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }

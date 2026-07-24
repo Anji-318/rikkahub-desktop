@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -65,7 +66,44 @@ class OpenAiClient : LlmClient {
                     })
                 }
                 params.history.takeLast(params.contextSize).forEach { msg -> add(buildMessage(msg)) }
+                // 工具循环续传：每个 exchange = assistant 工具调用消息 + role:tool 结果消息
+                params.toolExchanges.forEach { ex ->
+                    add(buildJsonObject {
+                        put("role", "assistant")
+                        put("content", JsonNull)
+                        put("tool_calls", buildJsonArray {
+                            add(buildJsonObject {
+                                put("id", ex.callId)
+                                put("type", "function")
+                                put("function", buildJsonObject {
+                                    put("name", ex.name)
+                                    put("arguments", ex.argumentsJson)
+                                })
+                            })
+                        })
+                    })
+                    add(buildJsonObject {
+                        put("role", "tool")
+                        put("tool_call_id", ex.callId)
+                        put("content", ex.result)
+                    })
+                }
             })
+            // 可用工具：OpenAI 格式 {type:"function", function:{name,description,parameters}}
+            if (params.tools.isNotEmpty()) {
+                put("tools", buildJsonArray {
+                    params.tools.forEach { t ->
+                        add(buildJsonObject {
+                            put("type", "function")
+                            put("function", buildJsonObject {
+                                put("name", t.name)
+                                put("description", t.description)
+                                put("parameters", json.parseToJsonElement(t.parametersSchema))
+                            })
+                        })
+                    }
+                })
+            }
             putCustomBodies(params.customBodies)
         }
 
@@ -80,6 +118,8 @@ class OpenAiClient : LlmClient {
                 error("LLM 请求失败 HTTP ${resp.status.value} $detail")
             }
             val channel = resp.bodyAsChannel()
+            // 流式 tool_calls 按 index 聚合（id/name 首帧到达，arguments 字符串逐帧拼接）
+            val toolCalls = sortedMapOf<Int, Triple<String, String, StringBuilder>>()
             while (!channel.isClosedForRead) {
                 val line = channel.readUTF8Line() ?: continue
                 if (!line.startsWith("data:")) continue
@@ -87,13 +127,31 @@ class OpenAiClient : LlmClient {
                 if (data == "[DONE]") break
                 runCatching {
                     val obj = json.parseToJsonElement(data).jsonObject
-                    val delta = obj["choices"]?.jsonArray?.firstOrNull()
-                        ?.jsonObject?.get("delta")?.jsonObject
+                    val choice = obj["choices"]?.jsonArray?.firstOrNull()?.jsonObject
+                    val delta = choice?.get("delta")?.jsonObject
                     val reasoning = (delta?.get("reasoning_content") ?: delta?.get("reasoning"))
                         ?.jsonPrimitive?.contentOrNull
                     if (!reasoning.isNullOrEmpty()) emit(StreamDelta.Reasoning(reasoning))
                     val content = delta?.get("content")?.jsonPrimitive?.contentOrNull
                     if (!content.isNullOrEmpty()) emit(StreamDelta.Content(content))
+                    delta?.get("tool_calls")?.jsonArray?.forEach { tc ->
+                        val o = tc.jsonObject
+                        val idx = o["index"]?.jsonPrimitive?.intOrNull ?: 0
+                        val fn = o["function"]?.jsonObject
+                        val existing = toolCalls[idx]
+                        val id = o["id"]?.jsonPrimitive?.contentOrNull ?: existing?.first ?: ""
+                        val name = fn?.get("name")?.jsonPrimitive?.contentOrNull ?: existing?.second ?: ""
+                        val args = existing?.third ?: StringBuilder()
+                        fn?.get("arguments")?.jsonPrimitive?.contentOrNull?.let { args.append(it) }
+                        toolCalls[idx] = Triple(id, name, args)
+                    }
+                    // finish_reason == "tool_calls" 时聚合完毕，整体发射一次
+                    if (choice?.get("finish_reason")?.jsonPrimitive?.contentOrNull == "tool_calls" && toolCalls.isNotEmpty()) {
+                        toolCalls.forEach { (_, v) ->
+                            emit(StreamDelta.ToolCall(v.first, v.second, v.third.toString()))
+                        }
+                        toolCalls.clear()
+                    }
                     obj["usage"]?.jsonObject?.let { usage ->
                         emit(
                             StreamDelta.Usage(

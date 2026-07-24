@@ -1,28 +1,47 @@
 package me.rerere.rikkahub.desktop.ui.chat
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import me.rerere.rikkahub.desktop.data.AppSettings
+import me.rerere.rikkahub.desktop.data.Backup
 import me.rerere.rikkahub.desktop.data.ChatMessage
 import me.rerere.rikkahub.desktop.data.Conversation
 import me.rerere.rikkahub.desktop.data.ConversationStore
+import me.rerere.rikkahub.desktop.data.GLOBAL_MEMORY_ID
+import me.rerere.rikkahub.desktop.data.MemoryEntry
+import me.rerere.rikkahub.desktop.data.MemoryStore
 import me.rerere.rikkahub.desktop.data.MessageNode
 import me.rerere.rikkahub.desktop.data.SettingsStore
 import me.rerere.rikkahub.desktop.llm.ChatParams
 import me.rerere.rikkahub.desktop.llm.LlmClient
 import me.rerere.rikkahub.desktop.llm.SearchClient
 import me.rerere.rikkahub.desktop.llm.StreamDelta
+import me.rerere.rikkahub.desktop.llm.ToolDefinition
+import me.rerere.rikkahub.desktop.llm.ToolExchange
+import me.rerere.rikkahub.desktop.llm.TtsClient
+import me.rerere.rikkahub.desktop.llm.applyMessageTemplate
+import me.rerere.rikkahub.desktop.llm.applyPromptVariables
+import java.io.ByteArrayInputStream
 import java.util.UUID
+import javax.sound.sampled.AudioSystem
+import javax.sound.sampled.Clip
+import javax.sound.sampled.LineEvent
 
 class ChatViewModel(
     val settingsStore: SettingsStore = SettingsStore(),
@@ -49,6 +68,10 @@ class ChatViewModel(
 
     private val _streamingReasoning = MutableStateFlow("")
     val streamingReasoning: StateFlow<String> = _streamingReasoning
+
+    /** 工具执行状态（如「正在写入记忆…」，null=无工具运行），显示在流式气泡处 */
+    private val _toolRunning = MutableStateFlow<String?>(null)
+    val toolRunning: StateFlow<String?> = _toolRunning
 
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error
@@ -97,6 +120,199 @@ class ChatViewModel(
         }
     }
 
+    // ===== 记忆 Memory =====
+    private val memoryStore = MemoryStore()
+    private val memoryJson = Json { ignoreUnknownKeys = true }
+
+    /** 记忆归属 id：useGlobalMemory 时用固定全局 id（全助手共享），否则按助手隔离 */
+    private fun memoryOwnerId(assistant: me.rerere.rikkahub.desktop.data.Assistant): String =
+        if (assistant.useGlobalMemory) GLOBAL_MEMORY_ID else assistant.id
+
+    /** memory 工具定义：模型自主读写长期记忆 */
+    private val memoryTool = ToolDefinition(
+        name = "memory",
+        description = "读写长期记忆。action=create 新建记忆（需提供 content）；action=update 更新指定 id 的记忆（需提供 id 和 content）；action=delete 删除指定 id 的记忆（需提供 id）。",
+        parametersSchema = """
+            {
+              "type": "object",
+              "properties": {
+                "action": {"type": "string", "enum": ["create", "update", "delete"], "description": "操作类型"},
+                "id": {"type": "string", "description": "记忆 id，update/delete 时必填"},
+                "content": {"type": "string", "description": "记忆内容，create/update 时必填"}
+              },
+              "required": ["action"]
+            }
+        """.trimIndent(),
+    )
+
+    /** systemPrompt 追加的记忆段：现有记忆 JSON + 工具使用规范（对齐安卓 buildMemoryPrompt 思路） */
+    private fun buildMemoryPrompt(ownerId: String): String {
+        val memJson = buildJsonArray {
+            memoryStore.list(ownerId).forEach { m ->
+                add(buildJsonObject {
+                    put("id", m.id)
+                    put("content", m.content)
+                })
+            }
+        }
+        return """
+
+            # 长期记忆
+            你拥有长期记忆能力，可以通过 memory 工具在对话中自主读写关于用户的重要信息。
+            当前已保存的记忆（JSON）：
+            $memJson
+            使用规范：
+            - 当用户透露重要偏好、个人信息、长期目标，或明确要求你记住/忘记某件事时，调用 memory 工具保存或删除对应记忆。
+            - 相似或相关的内容应合并到同一条记忆（用 update 更新原条目），不要为同一主题重复新建多条。
+            - 不要保存敏感信息（密码、密钥、证件号码等）。
+            - 调用工具时保持静默，不要在回复中向用户赘述你执行了什么记忆操作。
+        """.trimIndent()
+    }
+
+    /** 执行 memory 工具调用，返回给模型的简短结果文本 */
+    private fun executeMemoryTool(ownerId: String?, call: StreamDelta.ToolCall): String {
+        if (call.name != "memory") return "错误：未知工具 ${call.name}"
+        if (ownerId == null) return "错误：记忆功能未开启"
+        val args = runCatching { memoryJson.parseToJsonElement(call.argumentsJson).jsonObject }.getOrNull()
+            ?: return "错误：参数不是合法 JSON"
+        val action = args["action"]?.jsonPrimitive?.contentOrNull ?: return "错误：缺少 action"
+        val id = args["id"]?.jsonPrimitive?.contentOrNull
+        val content = args["content"]?.jsonPrimitive?.contentOrNull
+        return when (action) {
+            "create" ->
+                if (content.isNullOrBlank()) "错误：create 需要提供 content"
+                else { memoryStore.create(ownerId, content); "记忆已保存" }
+
+            "update" -> when {
+                id.isNullOrBlank() -> "错误：update 需要提供 id"
+                content.isNullOrBlank() -> "错误：update 需要提供 content"
+                memoryStore.update(ownerId, id, content) -> "记忆已更新"
+                else -> "错误：未找到 id $id"
+            }
+
+            "delete" -> when {
+                id.isNullOrBlank() -> "错误：delete 需要提供 id"
+                memoryStore.delete(ownerId, id) -> "记忆已删除"
+                else -> "错误：未找到 id $id"
+            }
+
+            else -> "错误：未知 action $action"
+        }
+    }
+
+    // 设置页「管理记忆」对话框的桥接方法（按助手归属读写）
+    fun listMemories(assistantId: String): List<MemoryEntry> {
+        val a = settings.assistants.firstOrNull { it.id == assistantId } ?: return emptyList()
+        return memoryStore.list(memoryOwnerId(a))
+    }
+
+    fun createMemory(assistantId: String, content: String) {
+        val a = settings.assistants.firstOrNull { it.id == assistantId } ?: return
+        memoryStore.create(memoryOwnerId(a), content)
+    }
+
+    fun updateMemory(assistantId: String, id: String, content: String): Boolean {
+        val a = settings.assistants.firstOrNull { it.id == assistantId } ?: return false
+        return memoryStore.update(memoryOwnerId(a), id, content)
+    }
+
+    fun deleteMemory(assistantId: String, id: String): Boolean {
+        val a = settings.assistants.firstOrNull { it.id == assistantId } ?: return false
+        return memoryStore.delete(memoryOwnerId(a), id)
+    }
+
+    // ===== 上下文压缩 =====
+    private val _compressing = MutableStateFlow(false)
+    val compressing: StateFlow<Boolean> = _compressing
+
+    /** 一键压缩当前会话历史（对齐安卓压缩上下文）：用摘要替换全部消息节点 */
+    fun compressConversation() {
+        if (_streaming.value || _compressing.value) return
+        val conv = _current.value ?: return
+        val messages = conv.currentMessages
+        if (messages.size < 4) { _error.value = "消息太少，无需压缩"; return }
+        val provider = settingsStore.activeProvider() ?: run { _error.value = "请先在设置中添加 Provider"; return }
+        val assistant = conv.assistantId?.let { id -> settings.assistants.firstOrNull { it.id == id } }
+            ?: settings.activeAssistant()
+        // 压缩模型：未指定时跟随聊天模型
+        val model = settings.compressModelId ?: assistant?.chatModel ?: settings.activeModel
+            ?: provider.models.firstOrNull() ?: run { _error.value = "未选择模型"; return }
+        // 拼接对话历史（去掉图片，逐条截断 + 总量截断）
+        val history = buildString {
+            messages.forEach { m ->
+                val role = if (m.role == "user") "用户" else "助手"
+                append(role).append("：").append(m.content.take(1000)).append("\n\n")
+            }
+        }.take(12000)
+        _compressing.value = true
+        scope.launch {
+            runCatching {
+                val summary = LlmClient.of(provider).complete(provider, model, settings.compressPrompt + "\n\n" + history)
+                if (summary.isNullOrBlank()) error("模型未返回摘要")
+                // 用单个 user 摘要节点替换全部消息节点
+                val latest = conversationStore.get(conv.id) ?: error("会话不存在")
+                latest.messageNodes.clear()
+                latest.messageNodes.add(
+                    MessageNode(messages = mutableListOf(ChatMessage(role = "user", content = "【前情摘要】\n$summary")))
+                )
+                latest.chatSuggestions = emptyList()
+                conversationStore.save(latest)
+                _current.value = conversationStore.get(latest.id)
+                _conversations.value = conversationStore.list()
+            }.onFailure { _error.value = "压缩失败: ${it.message}" }
+            _compressing.value = false
+        }
+    }
+
+    // ===== 语音朗读 (TTS) =====
+    private val ttsClient = TtsClient()
+
+    /** 正在朗读的消息 id（null=无播放） */
+    private val _speakingMessageId = MutableStateFlow<String?>(null)
+    val speakingMessageId: StateFlow<String?> = _speakingMessageId
+
+    private var currentClip: Clip? = null
+
+    /** 朗读消息（ttsEnabled 关闭时忽略；再次点击同一消息则停止） */
+    fun speakMessage(messageId: String, content: String) {
+        if (!settings.ttsEnabled) return
+        if (_speakingMessageId.value == messageId) { stopSpeaking(); return }
+        stopSpeaking()
+        if (content.isBlank()) return
+        val provider = settingsStore.activeProvider() ?: run { _error.value = "请先在设置中添加 Provider"; return }
+        _speakingMessageId.value = messageId
+        scope.launch {
+            val bytes = ttsClient.speak(provider, settings.ttsModel, settings.ttsVoice, content.take(2000))
+            if (bytes == null) {
+                _speakingMessageId.value = null
+                _error.value = "朗读失败: TTS 请求失败，请检查 TTS 模型与 Provider 配置"
+                return@launch
+            }
+            runCatching {
+                val clip = AudioSystem.getClip()
+                clip.open(AudioSystem.getAudioInputStream(ByteArrayInputStream(bytes)))
+                clip.addLineListener { e ->
+                    // 播完（STOP）或手动停止/关闭时清空朗读状态
+                    if (e.type == LineEvent.Type.STOP || e.type == LineEvent.Type.CLOSE) {
+                        if (_speakingMessageId.value == messageId) _speakingMessageId.value = null
+                    }
+                }
+                currentClip = clip
+                clip.start()
+            }.onFailure {
+                _speakingMessageId.value = null
+                _error.value = "朗读失败: ${it.message}"
+            }
+        }
+    }
+
+    /** 停止当前朗读 */
+    fun stopSpeaking() {
+        currentClip?.runCatching { stop(); close() }
+        currentClip = null
+        _speakingMessageId.value = null
+    }
+
     /** 收藏/取消收藏消息（持久化在会话 JSON 里） */
     fun toggleFavorite(messageId: String) {
         val conv = _current.value ?: return
@@ -117,6 +333,51 @@ class ChatViewModel(
         conversationStore.save(conv)
         _conversations.value = conversationStore.list()
         if (_current.value?.id == id) _current.value = conv
+    }
+
+    /** 手动重命名会话（标题非「新对话」后 AI 自动标题不再覆盖） */
+    fun renameConversation(id: String, newTitle: String) {
+        val title = newTitle.trim()
+        if (title.isEmpty()) return
+        val conv = conversationStore.get(id) ?: return
+        conv.title = title
+        conversationStore.save(conv)
+        _conversations.value = conversationStore.list()
+        if (_current.value?.id == id) _current.value = conv
+    }
+
+    /** 把会话移动到其他助手（更新绑定的 assistantId） */
+    fun moveConversationToAssistant(id: String, assistantId: String) {
+        val conv = conversationStore.get(id) ?: return
+        if (settings.assistants.none { it.id == assistantId }) return
+        conv.assistantId = assistantId
+        conversationStore.save(conv)
+        _conversations.value = conversationStore.list()
+        if (_current.value?.id == id) _current.value = conv
+    }
+
+    /** Fork 会话：以指定消息所在节点为止（含该节点）深拷贝出一个新会话并切换过去 */
+    fun forkConversation(messageId: String) {
+        val conv = _current.value ?: return
+        val nodeIdx = conv.messageNodes.indexOfFirst { n -> n.messages.any { it.id == messageId } }
+        if (nodeIdx < 0) return
+        val nodesCopy = conv.messageNodes.take(nodeIdx + 1).map { node ->
+            MessageNode(
+                id = UUID.randomUUID().toString(),
+                messages = node.messages.map { it.copy(id = UUID.randomUUID().toString()) }.toMutableList(),
+                selectIndex = node.selectIndex,
+            )
+        }.toMutableList()
+        if (nodesCopy.isEmpty()) return
+        val fork = Conversation(
+            // 「新对话」保持原标题，让 AI 自动标题仍能在新分支上生效
+            title = if (conv.title == "新对话") conv.title else conv.title + "（分支）",
+            messageNodes = nodesCopy,
+            assistantId = conv.assistantId,
+        )
+        conversationStore.save(fork)
+        _conversations.value = conversationStore.list()
+        _current.value = fork
     }
 
     /** 导出会话为 Markdown 文本 */
@@ -155,9 +416,27 @@ class ChatViewModel(
     }
 
     fun newConversation() {
-        val c = conversationStore.create(assistantId = settings.activeAssistantId)
+        val c = createWithPresetMessages(settings.activeAssistantId)
         _conversations.value = conversationStore.list()
         _current.value = c
+    }
+
+    /** 新建会话并写入助手预置消息（开场白），预置消息作为初始 messageNodes 参与后续上下文 */
+    private fun createWithPresetMessages(assistantId: String?): Conversation {
+        val c = conversationStore.create(assistantId = assistantId)
+        val assistant = assistantId?.let { id -> settings.assistants.firstOrNull { it.id == id } }
+            ?: settings.activeAssistant()
+        val presets = assistant?.presetMessages?.filter { it.content.isNotBlank() } ?: return c
+        presets.forEach { pm ->
+            c.messageNodes.add(
+                MessageNode(
+                    messages = mutableListOf(
+                        ChatMessage(role = if (pm.role == "assistant") "assistant" else "user", content = pm.content)
+                    )
+                )
+            )
+        }
+        return conversationStore.save(c)
     }
 
     /** 应用助手正则变换（对齐安卓 AssistantRegex 子集：input/output 作用域） */
@@ -225,7 +504,7 @@ class ChatViewModel(
         }.trim()
 
         var conv = _current.value
-            ?: conversationStore.create(assistantId = settings.activeAssistantId)
+            ?: createWithPresetMessages(settings.activeAssistantId)
         conv.messageNodes.add(
             MessageNode(
                 messages = mutableListOf(
@@ -262,7 +541,18 @@ class ChatViewModel(
             ?: s.activeAssistant()
         val model = assistant?.chatModel ?: s.activeModel ?: provider.models.firstOrNull()
         if (model == null) { _error.value = "未选择模型"; return }
-        val systemPrompt = assistant?.systemPrompt?.ifBlank { s.systemPrompt } ?: s.systemPrompt
+        // 提示词变量替换（对齐安卓 PlaceholderTransformer，作用于 systemPrompt）
+        val baseSystemPrompt = applyPromptVariables(
+            assistant?.systemPrompt?.ifBlank { s.systemPrompt } ?: s.systemPrompt,
+            model = model,
+            modelDisplayName = model,
+            assistantName = assistant?.name,
+            userNickname = s.userNickname,
+        )
+        // 记忆：开启时注入记忆段并注册 memory 工具
+        val memoryOwner = assistant?.takeIf { it.enableMemory }?.let { memoryOwnerId(it) }
+        val systemPrompt = baseSystemPrompt + (memoryOwner?.let { buildMemoryPrompt(it) } ?: "")
+        val tools = if (memoryOwner != null) listOf(memoryTool) else emptyList()
         val temperature = assistant?.temperature ?: s.temperature
         val reasoningEffort = assistant?.reasoningEffort
         val topP = assistant?.topP
@@ -284,8 +574,19 @@ class ChatViewModel(
 
         // 输入正则：作用于发送给 API 的用户消息（不改动本地存储）
         val rawContext = conv.currentMessages.dropLast(1)
+        val messageTemplate = assistant?.messageTemplate.orEmpty()
         val context = rawContext.map { msg ->
-            if (msg.role == "user") msg.copy(content = applyRegex(msg.content, assistant, "input")) else msg
+            var m = msg
+            if (m.role == "user") m = m.copy(content = applyRegex(m.content, assistant, "input"))
+            // system 消息同样应用提示词变量（用户消息不替换）
+            if (m.role == "system") {
+                m = m.copy(content = applyPromptVariables(m.content, model, model, assistant?.name, s.userNickname))
+            }
+            // 消息模板：串在正则之后，只作用于发送内容，不改本地存储
+            if (messageTemplate.isNotBlank() && m.content.isNotBlank()) {
+                m = m.copy(content = applyMessageTemplate(messageTemplate, m.content, m.role, m.createdAt))
+            }
+            m
         }
         val targetNode = conv.messageNodes.last()
         val targetIndex = targetNode.selectIndex
@@ -293,6 +594,7 @@ class ChatViewModel(
         _streaming.value = true
         _streamingText.value = ""
         _streamingReasoning.value = ""
+        _toolRunning.value = null
         streamJob = scope.launch {
             // 联网搜索：用最后一条用户消息做查询，结果注入 system 上下文
             var searchContext: String? = null
@@ -309,63 +611,89 @@ class ChatViewModel(
             val startAt = System.currentTimeMillis()
             var firstReasoningAt = 0L
             var firstContentAt = 0L
-            LlmClient.of(provider).streamChat(
-                provider,
-                ChatParams(
+            // 已完成的 工具调用→结果 序列（工具循环每轮请求续传）
+            val exchanges = mutableListOf<ToolExchange>()
+            try {
+                // 工具循环：模型发起工具调用则执行后续传，直到输出正文或达到 8 步上限（防死循环）
+                var step = 0
+                while (true) {
+                    var gotToolCall = false
+                    var failed = false
+                    runCatching {
+                        LlmClient.of(provider).streamChat(
+                            provider,
+                            ChatParams(
+                                model = model,
+                                history = context,
+                                systemPrompt = systemPrompt,
+                                temperature = temperature,
+                                topP = topP,
+                                maxTokens = maxTokens,
+                                contextSize = contextSize,
+                                reasoningEffort = reasoningEffort,
+                                searchContext = searchContext,
+                                tools = tools,
+                                toolExchanges = exchanges.toList(),
+                                customHeaders = assistant?.customHeaders ?: emptyList(),
+                                customBodies = assistant?.customBodies ?: emptyList(),
+                            ),
+                        ).collect { delta ->
+                            when (delta) {
+                                is StreamDelta.Content -> {
+                                    if (firstContentAt == 0L) firstContentAt = System.currentTimeMillis()
+                                    _toolRunning.value = null
+                                    sb.append(delta.text)
+                                    _streamingText.value = sb.toString()
+                                }
+                                is StreamDelta.Reasoning -> {
+                                    if (firstReasoningAt == 0L) firstReasoningAt = System.currentTimeMillis()
+                                    rsb.append(delta.text)
+                                    _streamingReasoning.value = rsb.toString()
+                                }
+                                is StreamDelta.Usage -> {
+                                    promptTokens = delta.promptTokens
+                                    completionTokens = delta.completionTokens
+                                }
+                                is StreamDelta.ToolCall -> {
+                                    gotToolCall = true
+                                    _toolRunning.value = "正在写入记忆…"
+                                    val result = executeMemoryTool(memoryOwner, delta)
+                                    exchanges.add(ToolExchange(delta.id, delta.name, delta.argumentsJson, result))
+                                }
+                            }
+                        }
+                    }.onFailure { e ->
+                        // 取消（停止生成）必须向外抛，保证 finally 保存已生成内容后协程正常结束
+                        if (e is CancellationException) throw e
+                        _error.value = e.message
+                        failed = true
+                    }
+                    step++
+                    if (failed || !gotToolCall || step >= 8) break
+                }
+            } finally {
+                _toolRunning.value = null
+                // 停止/出错时保留已生成的部分内容；输出正则作用于最终回复
+                targetNode.messages[targetIndex] = targetNode.messages[targetIndex].copy(
+                    content = applyRegex(sb.toString(), assistant, "output"),
+                    reasoning = rsb.toString(),
                     model = model,
-                    history = context,
-                    systemPrompt = systemPrompt,
-                    temperature = temperature,
-                    topP = topP,
-                    maxTokens = maxTokens,
-                    contextSize = contextSize,
-                    reasoningEffort = reasoningEffort,
-                    searchContext = searchContext,
-                    customHeaders = assistant?.customHeaders ?: emptyList(),
-                    customBodies = assistant?.customBodies ?: emptyList(),
-                ),
-            )
-                .catch { e -> _error.value = e.message }
-                .onCompletion {
-                    // 停止/出错时保留已生成的部分内容；输出正则作用于最终回复
-                    targetNode.messages[targetIndex] = targetNode.messages[targetIndex].copy(
-                        content = applyRegex(sb.toString(), assistant, "output"),
-                        reasoning = rsb.toString(),
-                        model = model,
-                        promptTokens = promptTokens,
-                        completionTokens = completionTokens,
-                        generationMs = System.currentTimeMillis() - startAt,
-                        reasoningMs = if (firstReasoningAt > 0) {
-                            (if (firstContentAt > 0) firstContentAt else System.currentTimeMillis()) - firstReasoningAt
-                        } else null,
-                    )
-                    conversationStore.save(conv)
-                    _current.value = conversationStore.get(conv.id)
-                    _conversations.value = conversationStore.list()
-                    _streaming.value = false
-                    if (sb.isNotBlank()) {
-                        generateTitle(conv.id, provider, settings.titleModelId ?: model, context)
-                        generateSuggestions(conv.id, provider, settings.suggestionModelId ?: model, context, sb.toString())
-                    }
+                    promptTokens = promptTokens,
+                    completionTokens = completionTokens,
+                    generationMs = System.currentTimeMillis() - startAt,
+                    reasoningMs = if (firstReasoningAt > 0) {
+                        (if (firstContentAt > 0) firstContentAt else System.currentTimeMillis()) - firstReasoningAt
+                    } else null,
+                )
+                conversationStore.save(conv)
+                _current.value = conversationStore.get(conv.id)
+                _conversations.value = conversationStore.list()
+                _streaming.value = false
+                if (sb.isNotBlank()) {
+                    generateTitle(conv.id, provider, settings.titleModelId ?: model, context)
+                    generateSuggestions(conv.id, provider, settings.suggestionModelId ?: model, context, sb.toString())
                 }
-                .collect { delta ->
-                    when (delta) {
-                        is StreamDelta.Content -> {
-                            if (firstContentAt == 0L) firstContentAt = System.currentTimeMillis()
-                            sb.append(delta.text)
-                            _streamingText.value = sb.toString()
-                        }
-                        is StreamDelta.Reasoning -> {
-                            if (firstReasoningAt == 0L) firstReasoningAt = System.currentTimeMillis()
-                            rsb.append(delta.text)
-                            _streamingReasoning.value = rsb.toString()
-                        }
-                        is StreamDelta.Usage -> {
-                            promptTokens = delta.promptTokens
-                            completionTokens = delta.completionTokens
-                        }
-                    }
-                }
+            }
         }
     }
 
@@ -502,4 +830,31 @@ class ChatViewModel(
     }
 
     fun clearError() { _error.value = null }
+
+    // ===== 本地备份/恢复 =====
+
+    /** 导出备份到指定 zip 路径（后台线程执行） */
+    fun exportBackupTo(path: String, onResult: (Boolean, String) -> Unit) {
+        scope.launch {
+            runCatching { Backup.exportBackup(java.io.File(path)) }
+                .onSuccess { onResult(true, "备份已导出") }
+                .onFailure { onResult(false, "导出失败: ${it.message}") }
+        }
+    }
+
+    /** 从 zip 恢复备份（后台线程执行）；成功后重载设置并刷新会话列表 */
+    fun importBackupFrom(path: String, onResult: (Boolean, String) -> Unit) {
+        scope.launch {
+            runCatching { Backup.importBackup(java.io.File(path)) }
+                .onSuccess {
+                    settingsStore.reload()
+                    refreshSettings()
+                    _conversations.value = conversationStore.list()
+                    _current.value = _conversations.value.firstOrNull { it.id == _current.value?.id }
+                        ?: _conversations.value.firstOrNull()
+                    onResult(true, "备份已恢复")
+                }
+                .onFailure { onResult(false, "恢复失败: ${it.message}") }
+        }
+    }
 }

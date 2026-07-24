@@ -56,7 +56,49 @@ class GeminiClient : LlmClient {
             }
             put("contents", buildJsonArray {
                 params.history.takeLast(params.contextSize).forEach { msg -> add(buildContent(msg)) }
+                // 工具循环续传：model 消息（functionCall part）+ user 消息（functionResponse part）
+                params.toolExchanges.forEach { ex ->
+                    add(buildJsonObject {
+                        put("role", "model")
+                        put("parts", buildJsonArray {
+                            add(buildJsonObject {
+                                put("functionCall", buildJsonObject {
+                                    put("name", ex.name)
+                                    put("args", runCatching { json.parseToJsonElement(ex.argumentsJson) }
+                                        .getOrElse { buildJsonObject {} })
+                                })
+                            })
+                        })
+                    })
+                    add(buildJsonObject {
+                        put("role", "user")
+                        put("parts", buildJsonArray {
+                            add(buildJsonObject {
+                                put("functionResponse", buildJsonObject {
+                                    put("name", ex.name)
+                                    put("response", buildJsonObject { put("result", ex.result) })
+                                })
+                            })
+                        })
+                    })
+                }
             })
+            // 可用工具：Gemini 格式 tools:[{functionDeclarations:[{name,description,parameters}]}]
+            if (params.tools.isNotEmpty()) {
+                put("tools", buildJsonArray {
+                    add(buildJsonObject {
+                        put("functionDeclarations", buildJsonArray {
+                            params.tools.forEach { t ->
+                                add(buildJsonObject {
+                                    put("name", t.name)
+                                    put("description", t.description)
+                                    put("parameters", json.parseToJsonElement(t.parametersSchema))
+                                })
+                            }
+                        })
+                    })
+                })
+            }
             put("generationConfig", buildJsonObject {
                 put("temperature", params.temperature)
                 params.topP?.let { put("topP", it) }
@@ -101,6 +143,17 @@ class GeminiClient : LlmClient {
                                 } else {
                                     emit(StreamDelta.Content(text))
                                 }
+                            }
+                            // functionCall 流式时一次到达（args 已是完整 JSON），直接发射
+                            p["functionCall"]?.jsonObject?.let { fc ->
+                                val name = fc["name"]?.jsonPrimitive?.contentOrNull ?: return@let
+                                emit(
+                                    StreamDelta.ToolCall(
+                                        id = java.util.UUID.randomUUID().toString(),
+                                        name = name,
+                                        argumentsJson = fc["args"]?.toString() ?: "{}",
+                                    )
+                                )
                             }
                         }
                     obj["usageMetadata"]?.jsonObject?.let { usage ->

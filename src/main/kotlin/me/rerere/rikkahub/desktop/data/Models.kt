@@ -31,6 +31,13 @@ data class ProviderConfig(
     val type: String = "openai", // openai / claude / google
 )
 
+/** 助手预置消息（开场白，新建会话时写入，role 仅 user/assistant） */
+@Serializable
+data class PresetMessage(
+    val role: String = "user",
+    val content: String = "",
+)
+
 @Serializable
 data class Assistant(
     val id: String = UUID.randomUUID().toString(),
@@ -45,6 +52,18 @@ data class Assistant(
     val regexes: List<AssistantRegex> = emptyList(), // 正则变换
     val customHeaders: List<KVEntry> = emptyList(), // 自定义请求头
     val customBodies: List<KVEntry> = emptyList(), // 自定义请求体（value 优先按 JSON 解析）
+    val presetMessages: List<PresetMessage> = emptyList(), // 预置消息（开场白）
+    val messageTemplate: String = "", // 消息模板（空=不启用，变量 {{ message }}/{{ role }}/{{ time }}/{{ date }}）
+    val enableMemory: Boolean = false, // 长期记忆（注入记忆段并注册 memory 工具）
+    val useGlobalMemory: Boolean = false, // 使用全局记忆（全助手共享）
+)
+
+/** 长期记忆条目（对齐安卓 Memory 子集，按助手分文件存储） */
+@Serializable
+data class MemoryEntry(
+    val id: String = UUID.randomUUID().toString(),
+    val content: String = "",
+    val updatedAt: Long = System.currentTimeMillis(),
 )
 
 /** 界面显示设置（对齐安卓 DisplaySetting 的子集） */
@@ -88,11 +107,24 @@ data class AppSettings(
     var titlePrompt: String = "为以下对话生成一个简短标题（不超过15个字），只输出标题本身：",
     var suggestionPrompt: String = "基于以下对话，给出4条用户接下来可能发送的简短回复（每条不超过20字），每行一条，不要编号、不要解释：",
     var translatePrompt: String = "把以下内容翻译成目标语言（中文内容翻译成英文，其他语言翻译成中文），只输出译文：",
+    var compressModelId: String? = null, // 上下文压缩
+    var compressPrompt: String = "请将以下对话历史压缩为一段简洁的摘要，保留关键信息、用户偏好、已达成共识的结论和未完成的任务，以便后续对话在此基础上继续。只输出摘要本身：",
     // 联网搜索
     var searchEnabled: Boolean = false,
     var searchService: String = "tavily", // tavily / exa
     var searchApiKey: String = "",
     var searchResultSize: Int = 5,
+    // 语音朗读 (TTS，走当前 Provider 的 OpenAI 兼容接口)
+    var ttsEnabled: Boolean = false,
+    var ttsModel: String = "tts-1", // TTS 模型名
+    var ttsVoice: String = "alloy", // 发音人
+    // 自定义主题（themeId = "custom" 时生效，HSL 色彩空间：H 0~360，S/L 0~1）
+    var customPrimaryH: Float = 20f, // 主色色相（默认暖橙，接近 rikka 主题）
+    var customPrimaryS: Float = 0.6f,
+    var customPrimaryL: Float = 0.5f,
+    var customBackgroundH: Float = 30f, // 背景色（默认浅暖白）
+    var customBackgroundS: Float = 0.2f,
+    var customBackgroundL: Float = 0.97f,
     /**
      * 修订号：每次设置变更 +1。AppSettings 是原地修改的，
      * 没有它 StateFlow 会因 equals 相等而吞掉更新（UI 不刷新）。
@@ -138,7 +170,7 @@ data class Conversation(
     val id: String = UUID.randomUUID().toString(),
     var title: String = "新对话",
     val messageNodes: MutableList<MessageNode> = mutableListOf(),
-    val assistantId: String? = null,
+    var assistantId: String? = null,
     var pinned: Boolean = false,
     val createdAt: Long = System.currentTimeMillis(),
     var updatedAt: Long = System.currentTimeMillis(),
