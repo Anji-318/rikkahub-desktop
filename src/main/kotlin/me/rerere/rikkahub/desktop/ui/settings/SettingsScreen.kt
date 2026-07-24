@@ -584,7 +584,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
         // 版本号（用于确认当前运行的构建版本）
         Spacer(Modifier.height(24.dp))
         Text(
-            "RikkaHub Desktop v0.5.0",
+            "RikkaHub Desktop v0.6.0",
             fontSize = 11.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
         )
