@@ -54,7 +54,9 @@ compose.desktop {
                 iconFile.set(project.file("icon.ico"))
             }
             macOS {
-                // DMG 校验要求主版本号 > 0，0.x 版本单独指定
+                // jpackage macOS 校验 app-version 主版本号必须 > 0，0.x 版本单独指定
+                // （app 镜像和 DMG 都要覆盖，否则 createDistributable 失败）
+                packageVersion = "1.0.0"
                 dmgPackageVersion = "1.0.0"
             }
         }
