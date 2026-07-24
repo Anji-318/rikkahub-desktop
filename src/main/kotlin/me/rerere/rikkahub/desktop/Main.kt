@@ -46,7 +46,7 @@ fun main() {
 
         Window(
             onCloseRequest = ::exitApplication,
-            title = "RikkaHub",
+            title = "RikkaHub v$APP_VERSION",
             icon = painterResource("icon.png"),
             state = rememberWindowState(
                 position = WindowPosition.PlatformDefault,

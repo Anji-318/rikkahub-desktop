@@ -40,6 +40,43 @@ kotlin {
     }
 }
 
+// 生成与 version 联动的版本号常量（标题栏 / 设置页显示用，避免硬编码漂移）
+// 注意：必须用独立 task 类，脚本内联 doLast 闭包会捕获脚本对象，与 configuration cache 不兼容
+abstract class GenerateAppVersionTask : DefaultTask() {
+    @get:Input
+    abstract val appVersion: Property<String>
+
+    @get:OutputFile
+    abstract val outputFile: RegularFileProperty
+
+    @TaskAction
+    fun generate() {
+        val f = outputFile.get().asFile
+        f.parentFile.mkdirs()
+        f.writeText(
+            """
+            package me.rerere.rikkahub.desktop
+
+            /** 由构建生成，与 build.gradle.kts 的 version 联动，请勿手动修改 */
+            const val APP_VERSION: String = "${appVersion.get()}"
+            """.trimIndent() + "\n"
+        )
+    }
+}
+
+val generateAppVersion = tasks.register<GenerateAppVersionTask>("generateAppVersion") {
+    appVersion.set(project.version.toString())
+    outputFile.set(layout.buildDirectory.file("generated/appVersion/me/rerere/rikkahub/desktop/AppVersion.kt"))
+}
+
+sourceSets.main {
+    kotlin.srcDir(layout.buildDirectory.dir("generated/appVersion"))
+}
+
+tasks.named("compileKotlin") {
+    dependsOn(generateAppVersion)
+}
+
 compose.desktop {
     application {
         mainClass = "me.rerere.rikkahub.desktop.MainKt"

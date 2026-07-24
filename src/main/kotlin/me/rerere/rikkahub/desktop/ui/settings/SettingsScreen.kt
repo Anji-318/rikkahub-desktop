@@ -28,6 +28,7 @@ import me.rerere.rikkahub.desktop.data.KVEntry
 import me.rerere.rikkahub.desktop.data.PresetMessage
 import me.rerere.rikkahub.desktop.data.ProviderConfig
 import me.rerere.rikkahub.desktop.data.QuickMessage
+import me.rerere.rikkahub.desktop.APP_VERSION
 import me.rerere.rikkahub.desktop.data.StoragePaths
 import me.rerere.rikkahub.desktop.ui.chat.ChatViewModel
 import me.rerere.rikkahub.desktop.ui.theme.CUSTOM_THEME_ID
@@ -584,7 +585,7 @@ fun SettingsScreen(vm: ChatViewModel, onBack: () -> Unit) {
         // 版本号（用于确认当前运行的构建版本）
         Spacer(Modifier.height(24.dp))
         Text(
-            "RikkaHub Desktop v0.6.0",
+            "RikkaHub Desktop v$APP_VERSION",
             fontSize = 11.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
         )
